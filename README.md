@@ -136,15 +136,15 @@ An example is in `example_workflows/audit_example.json`.
 The `.txt` is laid out for people: the indicative triage and the open points first, then the declared production context, the models and their licenses, inputs, how the image was generated, outputs, inactive nodes, guiding principles, your own declarations, and the technical environment last. The `.json` holds the same content for machines (plus all node settings); the optional `.pdf` is the `.txt` on A4 pages.
 
 ```
-AUDIT REPORT – Julia Kietzmann (Pertineo)
+AUDIT REPORT – Jane Doe (Example Studio)
 ══════════════════════════════════════════════════════════════════════════════
 
   File              shot010_001.png (image 1 of 2)
   Saved             2026-10-23 16:24:40 (UTC+02:00)
   Image             6144 x 4096 · png (16 bit)
   Folder            <output>/job_x
-  Author            Julia Kietzmann
-  Company           Pertineo
+  Author            Jane Doe
+  Company           Example Studio
   Purpose           Character insert, shot 010
   Production        Example feature
 
