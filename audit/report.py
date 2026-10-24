@@ -9,6 +9,7 @@
 Order: what to check first, the file, the models and their licenses, how it was generated,
 the author's declarations, and the technical environment last."""
 
+import re
 import textwrap
 
 from .collect import NOT_PROVIDED, UNKNOWN_INFO, base_model_mismatches
@@ -279,7 +280,10 @@ def render(data):
     L.append(f"{INDENT}Node packages used:")
     for g in data.get("custom_nodes") or []:
         types = ", ".join(t["type"] + (f" ×{t['count']}" if t["count"] > 1 else "") for t in g["node_types"])
-        L.append(f"{INDENT * 2}{g['package']}  {g['version']}")
+        wv = g.get("workflow_version")
+        if wv and re.fullmatch(r"[0-9a-f]{12,40}", wv):
+            wv = wv[:7]
+        L.append(f"{INDENT * 2}{g['package']}  {g['version']}" + (f"   (workflow saved with {wv})" if wv else ""))
         L += textwrap.wrap(types, WIDTH, initial_indent=INDENT * 3, subsequent_indent=INDENT * 3,
                            break_long_words=False)
 

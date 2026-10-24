@@ -378,8 +378,18 @@ def workflow_package_info(extra_pnginfo):
     return info
 
 
+def _installed_version(pkg_dir):
+    """Version of the package as it is installed right now: pyproject version, plus the git commit for
+    git checkouts (registry installs have no .git). Falls back to the commit alone."""
+    ver = _read_toml_version(os.path.join(pkg_dir, "pyproject.toml"))
+    commit = _git_short_hash(pkg_dir)
+    if ver and commit:
+        return f"{ver} (git {commit})"
+    return ver or (f"git {commit}" if commit else "unknown")
+
+
 def module_package_info(cls, comfy_version):
-    """Fallback: package from the file the node class is defined in."""
+    """Package and installed version from the file the node class is defined in."""
     try:
         raw = os.path.abspath(inspect.getfile(cls))
     except Exception:
@@ -400,11 +410,9 @@ def module_package_info(cls, comfy_version):
             if path.startswith(d + os.sep):
                 pkg = os.path.relpath(path, d).split(os.sep)[0]
                 pkg_dir = os.path.join(d, pkg)
-                ver = (_read_toml_version(os.path.join(pkg_dir, "pyproject.toml")) or _git_short_hash(pkg_dir)
-                       or "unknown")
-                return {"package": pkg, "version": ver, "source": "module path"}
+                return {"package": pkg, "version": _installed_version(pkg_dir), "source": "installed"}
     if os.path.realpath(raw).startswith(_PKG_DIR + os.sep) or raw.startswith(_PKG_DIR + os.sep):
-        return {"package": "comfyui-pertineo-vfx", "version": own_version(), "source": "module path"}
+        return {"package": "comfyui-pertineo-vfx", "version": _installed_version(_PKG_DIR), "source": "installed"}
     if base and os.path.realpath(raw).startswith(base + os.sep):
         return {"package": "comfy-core", "version": comfy_version, "source": "module path"}
     return None
@@ -430,26 +438,28 @@ def custom_nodes(graph, executed, extra_pnginfo, comfy_version, warn):
     for nid in executed:
         ct = graph.ctype(nid)
         cls = graph.cls(ct)
-        info = wf_info.get(ct)
-        if info is None and cls is not None:
-            info = module_package_info(cls, comfy_version)
-        elif info is not None and info["source"].endswith("(aux_id)"):
-            # git install: 'ver' is the commit the frontend saw; add the package version from its folder
-            info = dict(info)
-            commit = info["version"]
-            if re.fullmatch(r"[0-9a-f]{12,40}", commit):
-                commit = commit[:7]
-            mod = module_package_info(cls, comfy_version) if cls is not None else None
-            mod_ver = mod["version"] if mod else None
-            if mod_ver and mod_ver != "unknown" and not re.fullmatch(r"[0-9a-f]{7,40}", mod_ver):
-                info["version"] = f"{mod_ver} (git {commit})"
-            elif commit != "unknown":
-                info["version"] = f"git {commit}"
+        # The version saved in the workflow is the one the node had when it was *added* to the graph –
+        # it can be outdated. The installed version is what actually ran, so it wins; the package name
+        # from the workflow (registry id) is kept for display.
+        saved = wf_info.get(ct)
+        inst = module_package_info(cls, comfy_version) if cls is not None else None
+        if inst and inst["version"] != "unknown":
+            info = dict(inst)
+            if saved:
+                info["package"] = saved["package"].split("/")[-1] if inst["package"] != "comfy-core" else "comfy-core"
+                sv = saved["version"]
+                same = sv == inst["version"] or (re.fullmatch(r"[0-9a-f]{7,40}", sv) and f"git {sv[:7]}" in inst["version"])
+                if sv != "unknown" and not same:
+                    info["workflow_version"] = saved["version"]
+        else:
+            info = saved or inst
         if info is None:
             info = {"package": "unknown", "version": "unknown", "source": "not found"}
         key = (info["package"], info["version"])
         g = groups.setdefault(key, {"package": info["package"], "version": info["version"],
                                     "source": info["source"], "node_types": {}})
+        if info.get("workflow_version"):
+            g.setdefault("workflow_version", info["workflow_version"])
         g["node_types"][ct] = g["node_types"].get(ct, 0) + 1
         if (cls is not None and is_api_node(cls, ct)) or info["package"] == "comfy_api_nodes":
             api.append({"node_id": nid, "node_type": ct, "package": info["package"]})

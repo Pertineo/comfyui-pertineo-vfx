@@ -3,6 +3,14 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.1.1 – 2026-10-24
+
+### Fixed
+- Audit report: node package versions now show the version that is **installed and ran**, not the
+  version stored in the workflow when the node was added (that one can be outdated). If they differ,
+  the report notes "workflow saved with …". Git checkouts show "x.y.z (git <commit>)", registry
+  installs just "x.y.z".
+
 ## 1.1.0 – 2026-10-24
 
 ### Added
