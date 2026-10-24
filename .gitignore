@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+model_info.json
+model_info.csv
+model_info.ods
+model_info.xlsx

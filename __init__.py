@@ -22,6 +22,7 @@ from .common import LOG
 NODE_GROUPS = [
     "image_io",
     "matting",
+    "audit",
 ]
 
 NODE_CLASS_MAPPINGS = {}

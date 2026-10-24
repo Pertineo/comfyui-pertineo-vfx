@@ -1,0 +1,5 @@
+Disclaimer:,"All information in this file was compiled to the best of my knowledge from the sources named per model, as of the date given under 'checked'. It is provided without any warranty of accuracy, completeness or currency and is not legal advice. Licenses can change; the license published by the model's author always prevails. Check the original license before any commercial use.",,,,,,,,,,,,,
+"Pertineo VFX model_info – one row per model, from row 6. Empty cells count as UNKNOWN. Columns may be reordered, header names (row 4) must stay. Fill in only what you have verified yourself.",,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+Type,Base model,Name,Trigger words,Recommended,Commercial use,License,License checked,File,Version,Source,Released,AutoV2,SHA256,Notes
+"checkpoint, lora, vae …","e.g. SDXL 1.0, Krea2",readable name,comma separated,"e.g. strength 0.8 / cfg 1, 8 steps",yes / no / restricted / unclear,as stated by the author,YYYY-MM-DD,path as in the report,e.g. v2.1,URL of the model page,YYYY-MM-DD,10 characters (Civitai),"64 characters, from a report",

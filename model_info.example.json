@@ -1,0 +1,31 @@
+{
+  "_comment": "Pertineo VFX – model_info file. Copy to <ComfyUI user dir>/pertineo_vfx/model_info.json (used automatically) or point 'model_info_file' to your copy. Keys: SHA256 (best, survives renaming), AutoV2, path relative to the model folder, or file name; the optional 'file' field is matched too. Keys starting with '_' are ignored. All fields are optional – fill in what YOU have verified, the nodes never guess. The entries below are placeholders, not real license statements. '_disclaimer' is shown in every report that uses this file – adapt it to your own wording.",
+  "_disclaimer": "All information in this file was compiled to the best of my knowledge from the sources named per model, as of the date given under 'checked'. It is provided without any warranty of accuracy, completeness or currency and is not legal advice. Licenses can change; the license published by the model's author always prevails. Check the original license before any commercial use.",
+  "models": {
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+      "file": "diffusion_models/example-model.safetensors",
+      "name": "Example model",
+      "base_model": "<base model, e.g. Krea2>",
+      "source": "https://huggingface.co/<organisation>/<repository>",
+      "license": "<license name and version, as stated on the model page>",
+      "commercial_use": "yes | no | restricted | unclear",
+      "checked": "YYYY-MM-DD",
+      "notes": "Restrictions that apply to client work."
+    },
+    "example-lora.safetensors": {
+      "file": "loras/SDXL/example-lora.safetensors",
+      "name": "Example LoRA",
+      "base_model": "SDXL 1.0",
+      "trigger_words": [
+        "example style",
+        "sharp detail"
+      ],
+      "recommended": "strength 0.6–0.8",
+      "source": "https://civitai.com/models/<id>",
+      "license": "<license>",
+      "commercial_use": "restricted",
+      "checked": "YYYY-MM-DD",
+      "notes": "Keyed by file name: matches any folder. Prefer SHA256 keys for audit-proof records."
+    }
+  }
+}
