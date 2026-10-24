@@ -6,12 +6,14 @@
 
 """Plain-text rendering of the audit data, laid out for people (the JSON is for machines).
 
-Order: what to check first, the file, the models and their licenses, how it was generated,
-the author's declarations, and the technical environment last."""
+Order: the file, the indicative triage, what to check first, the declared production context,
+the models and their licenses, inputs, how it was generated, outputs, inactive nodes, guiding
+principles, the author's declarations, and the technical environment last."""
 
 import re
 import textwrap
 
+from . import context as K
 from .collect import NOT_PROVIDED, UNKNOWN_INFO, base_model_mismatches
 
 HEADER = "AUDIT REPORT"
@@ -29,6 +31,18 @@ ROLE_NAMES = {"checkpoint": "Checkpoint", "diffusion_model": "Diffusion model", 
               "text_encoder": "Text encoder", "lora": "LoRA", "controlnet": "ControlNet", "upscaler": "Upscaler",
               "clip_vision": "CLIP vision", "ip_adapter": "IP-Adapter", "style_model": "Style model", "vlm": "VLM",
               "matting_model": "Matting model"}
+U = "UNKNOWN"
+
+
+def _u(v, note=None):
+    """Values that are not known are always shown as UNKNOWN (never as '?', empty or 'unknown')."""
+    if v is None or (isinstance(v, str) and (not v.strip() or v.strip() in ("?", "–", "-")
+                                              or v.strip().lower().startswith("unknown"))):
+        rest = v.strip()[7:].strip() if isinstance(v, str) and v.strip().lower().startswith("unknown") else ""
+        return U + (f" {rest}" if rest else "") + (f" – {note}" if note else "")
+    return v
+
+
 PARAM_LABELS = [("seed", "Seed"), ("steps", "Steps"), ("cfg", "CFG"), ("guidance", "Guidance"),
                 ("sampler", "Sampler"), ("scheduler", "Scheduler"), ("denoise", "Denoise"), ("shift", "Shift")]
 
@@ -104,7 +118,8 @@ def _to_check(data):
     elif no_info:
         items.append(f"{len(no_info)} of {len(mods)} model(s) without source / license – add them to the "
                      f"model_info file.")
-    restricted = [m for m in mods if str(m.get("commercial_use", "")).lower() in ("no", "restricted", "unclear")]
+    restricted = [m for m in mods if str(m.get("commercial_use", "")).lower() in ("no", "restricted", "unclear")
+                  and m.get("separate_license") != "yes"]
     if restricted:
         items.append("Commercial use is not plainly allowed for: " +
                      ", ".join(m["file"].split("/")[-1] for m in restricted) + ".")
@@ -153,14 +168,73 @@ def render(data):
         L += _kv("Company", company)
     L += _kv("Purpose", _manual(data, "workflow_purpose") or NOT_PROVIDED)
 
+    ctx = data.get("context") or {}
+    for key, label in K.TEXT_FIELDS[:3]:
+        if ctx.get(key):
+            L += _kv(label.split(" / ")[0] if key != "shot_asset" else "Shot / asset", ctx[key])
+
+    # ---- triage --------------------------------------------------------
+    tri = data.get("triage")
+    if tri:
+        L += _title("Indicative triage")
+        L.append(f"{INDENT}[ {tri['grade']} ]  {tri['label']}")
+        L += _kv("Why", tri.get("reason", "?"))
+        if tri.get("routes"):
+            L += _kv("Open points", " · ".join(f"{r['route']} {r['open_points']}" for r in tri["routes"]))
+        c = tri.get("counts") or {}
+        L += _kv("Findings", " · ".join(f"{c[k]} {k}" for k in K.SEVERITIES if c.get(k)) or "none")
+        rep = data.get("reproducibility") or {}
+        if rep:
+            L += _kv("Reproducibility", rep.get("status", "?"))
+        L.append("")
+        L.append(f"{INDENT}Scale:")
+        for g in ("A", "B", "C", "D"):
+            mark = ">" if g == tri["grade"] else " "
+            L += textwrap.wrap(f"{K.TRIAGE[g]} – {K.TRIAGE_LEGEND[g]}", WIDTH,
+                               initial_indent=f"{INDENT}{mark} {g}  ", subsequent_indent=INDENT + " " * 5)
+        L.append("")
+        L += textwrap.wrap(tri.get("note", K.TRIAGE_NOTE), WIDTH - 2, initial_indent=INDENT, subsequent_indent=INDENT)
+
     # ---- to check ------------------------------------------------------
-    todo = _to_check(data)
     L += _title("To check")
-    if todo:
+    findings = data.get("findings")
+    if findings:
+        L += textwrap.wrap("Severity: critical > high > medium > low. Evidence: " + K.EVIDENCE_LEGEND, WIDTH - 2,
+                           initial_indent=INDENT, subsequent_indent=INDENT)
+        L.append("")
+    if findings is not None:
+        if not findings:
+            L.append(INDENT + "Nothing open.")
+        for fi in findings:
+            route = K.ROUTES.get(fi.get("route"), fi.get("route", "?"))
+            L += _kv("•", f"[{fi['severity'].upper()}] {fi['text']}", key=2)
+            L += _kv("", f"→ {route} · {fi.get('evidence', '?')}", key=4)
+    else:  # data from 1.1.x
+        todo = _to_check(data)
         for t in todo:
             L += _kv("•", t, key=2)
-    else:
-        L.append(INDENT + "Nothing open – all models documented, all fields filled in.")
+        if not todo:
+            L.append(INDENT + "Nothing open – all models documented, all fields filled in.")
+
+    # ---- production context -------------------------------------------
+    if tri:
+        L += _title("Production context (declared)")
+        if not ctx:
+            L += textwrap.wrap("Not connected – add 'Pertineo Production Context' to declare purpose, rights and "
+                               "consent.", WIDTH - 2, initial_indent=INDENT, subsequent_indent=INDENT)
+        else:
+            for key, label in K.TEXT_FIELDS[3:]:
+                if ctx.get(key):
+                    L += _kv(label, ctx[key], key=44)
+            for key, label, _a, _d in K.CHOICE_FIELDS:
+                v = ctx.get(key)
+                if key == "execution_environment" and str(v).startswith("auto"):
+                    v = f"{data.get('environment_declared', '?')} (derived from the workflow)"
+                L += _kv(label, _u(v, "not declared"), key=44)
+            for key, label in K.REVIEWER_FIELDS:
+                L += _kv(label, ctx.get(key) or "– not recorded –", key=44)
+            if ctx.get("context_notes"):
+                L += _kv("Notes", ctx["context_notes"], key=44)
 
     # ---- models --------------------------------------------------------
     mods = data.get("models") or []
@@ -183,8 +257,8 @@ def render(data):
                   "clip_strength", "weight"):
             if k in m:
                 L += _kv(k.replace("_", " ").capitalize(), _fmt(m[k]), indent=INDENT * 2)
-        sha = m.get("sha256", "–")
-        L += _kv("SHA256", sha, indent=INDENT * 2)
+        sha = str(m.get("sha256") or "not computed")
+        L += _kv("SHA256", sha if re.fullmatch(r"[0-9a-f]{64}", sha) else f"{U} – {sha}", indent=INDENT * 2)
         if m.get("autov2"):
             L += _kv("AutoV2", m["autov2"], indent=INDENT * 2)
         if _unknown(m.get("source")) and _unknown(m.get("license")) and _unknown(m.get("commercial_use")):
@@ -192,9 +266,28 @@ def render(data):
         else:
             L += _kv("Source", m.get("source", UNKNOWN_INFO), indent=INDENT * 2)
             L += _kv("License", m.get("license", UNKNOWN_INFO), indent=INDENT * 2)
-            L += _kv("Commercial use", m.get("commercial_use", UNKNOWN_INFO), indent=INDENT * 2)
+            cu = m.get("commercial_use", UNKNOWN_INFO)
+            if str(cu).lower() not in ("yes", "no", "restricted", "unclear") and not _unknown(cu):
+                cu = f"{U} – '{cu}' is not yes / no / restricted / unclear"
+            L += _kv("Commercial use", cu, indent=INDENT * 2)
+        lic_known = not _unknown(m.get("license"))
         if m.get("checked"):
             L += _kv("License checked", m["checked"], indent=INDENT * 2)
+        elif lic_known and "findings" in data:
+            L += _kv("License checked", U + " – date not recorded", indent=INDENT * 2)
+        if m.get("separate_license"):
+            L += _kv("Separate license", m["separate_license"] + (f" – {m['license_reference']}"
+                                                                    if m.get("license_reference") else
+                                                                    (" – reference not recorded"
+                                                                     if m["separate_license"] == "yes" else "")),
+                     indent=INDENT * 2)
+        elif "findings" in data and str(m.get("commercial_use", "")).lower() != "yes":
+            L += _kv("Separate license", U + " – not recorded", indent=INDENT * 2)
+        for k, lab in (("creator", "Creator"), ("attribution", "Attribution"), ("training_data", "Training data")):
+            if m.get(k):
+                L += _kv(lab, m[k], indent=INDENT * 2)
+        if m.get("family_rows"):
+            L += _kv("Family row", ", ".join(m["family_rows"]), indent=INDENT * 2)
         if m.get("license_notes"):
             L += _kv("Notes", m["license_notes"], indent=INDENT * 2)
         L += _kv("Loaded by", f"{m['node_type']} #{m['node_id']}", indent=INDENT * 2)
@@ -206,16 +299,42 @@ def render(data):
         L += textwrap.wrap(f"Note from the model_info file: {own}", WIDTH, initial_indent=INDENT,
                            subsequent_indent=INDENT)
 
+    # ---- input files -----------------------------------------------------
+    if "input_assets" in data:
+        ins = data.get("input_assets") or []
+        L += _title(f"Input files ({len(ins)})")
+        if not ins:
+            L.append(INDENT + "No input files found in the executed graph.")
+        for n, a in enumerate(ins, 1):
+            L.append(f"{INDENT}{n}. {a['role']} – {a['file']}")
+            L += _kv("Location", a.get("location", "?") + (f" · {a['files_in_folder']} file(s)"
+                                                           if "files_in_folder" in a else ""), indent=INDENT * 2)
+            ash = str(a.get("sha256") or "not computed")
+            L += _kv("SHA256", ash if re.fullmatch(r"[0-9a-f]{64}", ash) else f"{U} – {ash}", indent=INDENT * 2)
+            L += _kv("Used by", f"{a['node_type']} #{a['node_id']} ({a['input']})", indent=INDENT * 2)
+        if ins:
+            L.append(INDENT + "Rights of these inputs: see 'Reference images' and the production context.")
+
     # ---- generation ----------------------------------------------------
     samp = data.get("sampling") or []
     L += _title("Generation")
+    if data.get("workflow_type"):
+        L += _kv("Workflow type", ", ".join(data["workflow_type"]))
+    if data.get("seed_mode"):
+        L += _kv("Seed control", f"{data['seed_mode']['mode']} (frontend setting, #{data['seed_mode']['node_id']})")
+    elif samp and "findings" in data:
+        L += _kv("Seed control", U + " – not stored in the workflow")
+    for cap in data.get("capabilities") or []:
+        L += _kv("Capability", f"{cap['capability']} – {', '.join(cap['evidence'][:4])}")
+    if data.get("workflow_type") or data.get("seed_mode") or data.get("capabilities"):
+        L.append("")
     if not samp:
         L.append(INDENT + "No sampler node found in the executed graph.")
     for s in samp:
         title = f"  \"{s['title']}\"" if s.get("title") and s["title"] != s["node_type"] else ""
         L.append(f"{INDENT}{s['node_type']} #{s['node_id']}{title}")
         p = dict(s.get("params") or {})
-        p.update({k: f"not fixed – {v}" for k, v in (s.get("unresolved") or {}).items()})
+        p.update({k: f"{U} – {v}" for k, v in (s.get("unresolved") or {}).items()})
         shown = set()
         for k, label in PARAM_LABELS:
             if k in p:
@@ -240,6 +359,8 @@ def render(data):
             for e in encs:
                 for k, t in e["texts"].items():
                     lab = label if k == "text" else f"{label} [{k}]"
+                    if t.startswith("<linked from") or t.startswith("<linked"):
+                        t = f"{U} – {t.strip('<>')}"
                     L += _kv(lab, t if t.strip() else "(empty)", indent=INDENT * 2)
         L.append("")
 
@@ -258,6 +379,37 @@ def render(data):
         dur = f"{v['duration_sec']:.3f} s" if v.get("duration_sec") is not None else "?"
         L += _kv("Video", f"{v.get('frames') or '?'} frames · {_fmt(v['fps'])} fps · {dur}")
 
+    notable = data.get("notable_settings") or []
+    if notable:
+        L.append("")
+        L.append(f"{INDENT}Other settings:")
+        for ns in notable:
+            vals = ", ".join(f"{k} {_fmt(v)}" for k, v in ns["settings"].items())
+            L += _kv(f"{ns['node_type']} #{ns['node_id']}", vals, indent=INDENT * 2, key=0)
+
+    # ---- outputs ---------------------------------------------------------
+    if data.get("output_nodes"):
+        L += _title("Output")
+        for o in data["output_nodes"]:
+            vals = ", ".join(f"{k} {_fmt(v)}" for k, v in o["settings"].items()) or "–"
+            L += _kv(f"{o['node_type']} #{o['node_id']}", vals, key=0)
+
+    # ---- inactive nodes ----------------------------------------------------
+    if data.get("inactive_nodes"):
+        L += _title(f"Inactive nodes ({len(data['inactive_nodes'])}) – not part of the run")
+        for x in data["inactive_nodes"]:
+            t = f"  \"{x['title']}\"" if x.get("title") and x["title"] != x["node_type"] else ""
+            L += _kv("•", f"{x['node_type']} #{x['node_id']}{t} – {x['state']}"
+                     + (f" ({', '.join(x['model_files'])})" if x.get("model_files") else ""), key=2)
+
+    # ---- principles ------------------------------------------------------
+    if data.get("principles"):
+        L += _title("Guiding principles (indicative)")
+        L += textwrap.wrap(K.PRINCIPLES_NOTE, WIDTH - 2, initial_indent=INDENT, subsequent_indent=INDENT)
+        L.append("")
+        for pr in data["principles"]:
+            L += _kv(f"{pr['id']} {pr['status'].upper()}", f"{pr['principle']} – {pr['basis']}", key=12)
+
     # ---- declarations ----------------------------------------------------
     L += _title("Declared by the author")
     for key, label in MANUAL_FIELDS:
@@ -266,16 +418,19 @@ def render(data):
     # ---- environment ---------------------------------------------------
     env = data.get("environment") or {}
     L += _title("Software and hardware")
-    comfy = env.get("comfyui", "?") + (f" (git {env['comfyui_commit']})" if env.get("comfyui_commit") else "")
+    comfy = _u(env.get("comfyui")) + (f" (git {env['comfyui_commit']})" if env.get("comfyui_commit") else "")
     L += _kv("ComfyUI", comfy)
-    L += _kv("Frontend", env.get("frontend", "?") + (f"  ({env['frontend_override']})"
-                                                     if env.get("frontend_override") else ""))
-    L += _kv("Python / torch", f"{env.get('python', '?')} / {env.get('torch', '?')} · CUDA {env.get('cuda', '?')}")
-    L += _kv("GPU", env.get("gpu", "?"))
-    L += _kv("OS", env.get("os", "?"))
+    L += _kv("Frontend", _u(env.get("frontend")) + (f"  ({env['frontend_override']})"
+                                                    if env.get("frontend_override") else ""))
+    L += _kv("Python / torch", f"{_u(env.get('python'))} / {_u(env.get('torch'))} · CUDA {_u(env.get('cuda'))}")
+    L += _kv("GPU", _u(env.get("gpu")))
+    L += _kv("OS", _u(env.get("os")))
     api = data.get("api_nodes") or []
     L += _kv("API nodes", ", ".join(f"{a['node_type']} #{a['node_id']}" for a in api) if api
              else "none (everything ran locally)")
+    remote = [e for e in data.get("external_services") or [] if e["kind"] != "API node"]
+    if remote:
+        L += _kv("Remote inputs", ", ".join(e["service"] for e in remote))
     L.append("")
     L.append(f"{INDENT}Node packages used:")
     for g in data.get("custom_nodes") or []:
@@ -283,7 +438,7 @@ def render(data):
         wv = g.get("workflow_version")
         if wv and re.fullmatch(r"[0-9a-f]{12,40}", wv):
             wv = wv[:7]
-        L.append(f"{INDENT * 2}{g['package']}  {g['version']}" + (f"   (workflow saved with {wv})" if wv else ""))
+        L.append(f"{INDENT * 2}{_u(g['package'])}  {_u(g['version'])}" + (f"   (workflow saved with {wv})" if wv else ""))
         L += textwrap.wrap(types, WIDTH, initial_indent=INDENT * 3, subsequent_indent=INDENT * 3,
                            break_long_words=False)
 
@@ -300,6 +455,6 @@ def render(data):
     L += textwrap.wrap(
         f"Report by Pertineo VFX {data.get('generator', {}).get('version', '?')} · collected "
         f"{_date(data.get('generated'))} · {g.get('nodes_executed', '?')} of {g.get('nodes_in_prompt', '?')} "
-        f"nodes contributed to the output; bypassed and muted nodes are not part of the run and not listed. "
+        f"nodes contributed to the output; bypassed and muted nodes are not part of the run. "
         f"Machine-readable version: the .json with the same name (when write_json is on).", WIDTH)
     return "\n".join(L).rstrip() + "\n"

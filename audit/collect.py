@@ -11,6 +11,7 @@ exception that stops the generation.
 """
 
 import datetime
+import fnmatch
 import importlib.metadata
 import inspect
 import json
@@ -24,10 +25,11 @@ from . import hashing
 
 SCHEMA = "pertineo-audit/1"
 UNKNOWN_INFO = "UNKNOWN – add to model_info file"
-NOT_PROVIDED = "– not provided –"
+NOT_PROVIDED = "UNKNOWN – not provided"
 MODEL_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".sft", ".bin")
 MODEL_INFO_DEFAULT = "model_info.json"
 DISCLAIMER_KEY = "_disclaimer"
+PATTERNS_KEY = "_patterns"
 TOOL_DISCLAIMER = ("License and source information in this report comes from the model_info file of the person "
                    "who ran the workflow. It is not verified by Pertineo VFX, comes without warranty and is not "
                    "legal advice. The license published by each model's author always prevails.")
@@ -606,11 +608,14 @@ def _model_refs(graph, nid, warn):
 
 # Column order of new tables (what people read first comes first); the reader accepts any order.
 CSV_COLUMNS = ["type", "base_model", "name", "trigger_words", "recommended", "commercial_use", "license", "checked",
-               "file", "version", "source", "released", "autov2", "sha256", "notes"]
+               "separate_license", "license_reference", "file", "version", "source", "creator", "released",
+               "autov2", "sha256", "attribution", "training_data", "notes"]
 COLUMN_TITLES = {"type": "Type", "base_model": "Base model", "name": "Name", "trigger_words": "Trigger words",
                  "recommended": "Recommended", "commercial_use": "Commercial use", "license": "License",
-                 "checked": "License checked", "file": "File", "version": "Version", "source": "Source",
-                 "released": "Released", "autov2": "AutoV2", "sha256": "SHA256", "notes": "Notes"}
+                 "checked": "License checked", "separate_license": "Separate license",
+                 "license_reference": "License reference", "file": "File", "version": "Version", "source": "Source",
+                 "creator": "Creator", "released": "Released", "autov2": "AutoV2", "sha256": "SHA256",
+                 "attribution": "Attribution", "training_data": "Training data", "notes": "Notes"}
 _HEADER_ALIASES = {
     "type": ("type", "model type", "kind", "category"),
     "base_model": ("base model", "basemodel", "base"),
@@ -620,12 +625,19 @@ _HEADER_ALIASES = {
     "commercial_use": ("commercial use", "commercial", "commercial usage"),
     "license": ("license", "licence"),
     "checked": ("checked", "license checked", "licence checked", "last checked"),
+    "separate_license": ("separate license", "separate licence", "own license", "own licence",
+                         "license acquired", "licence acquired", "extra license", "additional license"),
+    "license_reference": ("license reference", "licence reference", "license ref", "licence ref",
+                          "agreement", "license agreement", "approval reference"),
     "file": ("file", "filename", "file name", "path", "model file"),
     "version": ("version", "model version"),
     "source": ("source", "url", "link", "download"),
+    "creator": ("creator", "author", "maintainer", "publisher", "made by"),
     "released": ("released", "release date", "upload date", "uploaded", "published"),
     "autov2": ("autov2", "auto v2", "civitai hash"),
     "sha256": ("sha256", "sha 256", "sha-256", "sha", "hash"),
+    "attribution": ("attribution", "attribution required", "credit", "credits"),
+    "training_data": ("training data", "dataset", "training dataset", "trained on"),
     "notes": ("notes", "note", "comment", "comments"),
 }
 _ALIAS_TO_KEY = {a: k for k, al in _HEADER_ALIASES.items() for a in al + (k, k.replace("_", " "))}
@@ -787,12 +799,18 @@ def _xlsx_rows(path):
     return rows
 
 
+def _is_pattern(f):
+    """A file pattern for a family row: one token (no spaces) with * or ?, e.g. *minimax_h3*."""
+    return bool(f) and ("*" in f or "?" in f) and not re.search(r"\s", f)
+
+
 def _rows_to_info(rows):
     """Turns table rows into {"_disclaimer": ..., "models": {...}}.
     The header row is the first row with at least three known column names. Above it, a row starting with
     'Disclaimer' (or '_disclaimer') holds the disclaimer – in the same cell after a colon or in the next
     cell; other rows above the header are free notes. Below it, rows starting with '#' are ignored and
-    a row counts as a model only if it has a 64-character SHA256 or a file name with an extension."""
+    a row counts as a model only if it has a 64-character SHA256, a file name with an extension or a file
+    pattern (family row, e.g. *minimax_h3*)."""
     out = {"models": {}}
     header_idx, header = None, None
     for i, row in enumerate(rows):
@@ -830,8 +848,9 @@ def _rows_to_info(rows):
         if sha and not _SHA_RE.fullmatch(sha):
             sha = ""
             rec.pop("sha256")
-        f = rec.get("file", "")
-        if not sha and not (f and "." in f.rsplit("/", 1)[-1]):
+        f = rec.get("file", "").replace("\\", "/")
+        is_pattern = _is_pattern(f)
+        if not sha and not is_pattern and not (f and "." in f.rsplit("/", 1)[-1]):
             continue  # hint / example row without a model
         if sha:
             rec["sha256"] = sha.lower()
@@ -845,7 +864,7 @@ def _rows_to_info(rows):
             parts = tw.split(";") if ";" in tw else re.split(r"[,\n]", tw)
             rec["trigger_words"] = [re.sub(r"\s+", " ", t).strip(" ,").strip("\"'").strip()
                                     for t in parts if t.strip(" ,\"'")]
-        out["models"][sha.lower() if sha else f] = rec
+        out["models"][f if is_pattern else (sha.lower() if sha else f)] = rec
     return out
 
 
@@ -892,11 +911,17 @@ def load_model_info(model_info_file, show, warn):
     if not isinstance(data, dict):
         warn("model_info file must contain a JSON object – ignored.")
         return {}, show.path(path)
-    entries = {}
+    entries, patterns = {}, []
     for k, v in data.items():
-        if isinstance(v, dict) and not str(k).startswith("_"):
-            entries[str(k).strip()] = v
-            entries.setdefault(str(k).strip().lower(), v)
+        if not isinstance(v, dict) or str(k).startswith("_"):
+            continue
+        key = str(k).strip()
+        pat = str(v.get("file") or key).strip().replace("\\", "/")
+        if _is_pattern(pat):  # family row, e.g. *minimax_h3* – applies to every matching file
+            patterns.append((pat, v))
+            continue
+        entries[key] = v
+        entries.setdefault(key.lower(), v)
     # secondary index from the optional "file" field ("loras/SDXL/x.safetensors"), so entries keyed
     # by SHA256 are also found when hashing is off; explicit keys always win
     for k, v in list(entries.items()):
@@ -905,23 +930,58 @@ def load_model_info(model_info_file, show, warn):
             for alias in (f, f.split("/", 1)[1] if "/" in f else f, f.rsplit("/", 1)[-1]):
                 entries.setdefault(alias, v)
                 entries.setdefault(alias.lower(), v)
+    if patterns:
+        # less specific first, so that a more specific family row overrides a broader one
+        entries[PATTERNS_KEY] = sorted(patterns, key=lambda p: len(p[0].replace("*", "").replace("?", "")))
     disclaimer = raw.get("_disclaimer") if isinstance(raw, dict) else None
     if isinstance(disclaimer, str) and disclaimer.strip():
         entries[DISCLAIMER_KEY] = disclaimer.strip()  # never matches a model: not a dict, not a file name
     return entries, show.path(path)
 
 
-def lookup_model_info(entries, sha256, rel_name):
-    entries = {k: v for k, v in entries.items() if isinstance(v, dict)}
+def _truthy(v):
+    if isinstance(v, bool):
+        return v
+    return str(v or "").strip().lower() in ("yes", "y", "true", "1", "ja", "x", "✓")
+
+
+# fields that describe one file – never inherited from a family row
+_PER_FILE_KEYS = {"file", "name", "version", "released", "sha256", "autov2", "trigger_words", "recommended"}
+
+
+def lookup_model_info(entries, sha256, rel_name, full_name=None):
+    """Returns (merged info or None, how it matched). An exact entry (SHA256 / AutoV2 / path / file name)
+    wins; family rows (file pattern with * or ?) fill in every field the exact entry leaves empty."""
+    patterns = entries.get(PATTERNS_KEY) or []
+    direct = {k: v for k, v in entries.items() if isinstance(v, dict)}
     keys = []
     if sha256:
         keys += [sha256.lower(), hashing.autov2(sha256), hashing.autov2(sha256).lower()]
-    if rel_name:
-        keys += [rel_name, rel_name.replace("\\", "/"), os.path.basename(rel_name), os.path.basename(rel_name).lower()]
+    for n in (full_name, rel_name):
+        if n:
+            n = n.replace("\\", "/")
+            keys += [n, n.lower(), os.path.basename(n), os.path.basename(n).lower()]
+    exact, matched = None, None
     for k in keys:
-        if k and k in entries:
-            return entries[k], k
-    return None, None
+        if k and k in direct:
+            exact, matched = direct[k], k
+            break
+    names = [n.replace("\\", "/").lower() for n in (full_name, rel_name) if n]
+    names += [os.path.basename(n) for n in names]
+    fam, fam_pats = {}, []
+    for pat, rec in patterns:
+        if any(fnmatch.fnmatchcase(n, pat.lower()) for n in names):
+            fam.update({k: v for k, v in rec.items() if v not in (None, "", []) and k not in _PER_FILE_KEYS})
+            fam_pats.append(pat)
+    if exact is None and not fam_pats:
+        return None, None
+    info = dict(fam)
+    if exact is not None:
+        info.update({k: v for k, v in exact.items() if v not in (None, "", [])})
+    how = matched if exact is not None else None
+    if fam_pats:
+        info["_family"] = fam_pats
+    return info, how
 
 
 def models(graph, executed, compute_hashes, info_entries, show, warn, self_id=None):
@@ -970,7 +1030,7 @@ def models(graph, executed, compute_hashes, info_entries, show, warn, self_id=No
                 except OSError:
                     pass
 
-            info, matched = lookup_model_info(info_entries, sha, name)
+            info, matched = lookup_model_info(info_entries, sha, name, entry["file"])
             if info is None:
                 entry["source"] = entry["license"] = entry["commercial_use"] = UNKNOWN_INFO
                 entry["license_notes"] = ""
@@ -982,8 +1042,18 @@ def models(graph, executed, compute_hashes, info_entries, show, warn, self_id=No
                 entry["commercial_use"] = UNKNOWN_INFO if cu in (None, "") else (
                     ("yes" if cu else "no") if isinstance(cu, bool) else str(cu))
                 entry["license_notes"] = str(info.get("notes") or "")
-                entry["info_matched_by"] = "sha256" if sha and matched in (sha.lower(),) else (
-                    "autov2" if sha and matched and matched.lower() == hashing.autov2(sha).lower() else "file name")
+                if matched is None:
+                    entry["info_matched_by"] = "family " + ", ".join(info.get("_family") or [])
+                else:
+                    entry["info_matched_by"] = "sha256" if sha and matched in (sha.lower(),) else (
+                        "autov2" if sha and matched.lower() == hashing.autov2(sha).lower() else "file name")
+                if info.get("_family"):
+                    entry["family_rows"] = info["_family"]
+                sl = info.get("separate_license")
+                if sl not in (None, ""):
+                    entry["separate_license"] = "yes" if _truthy(sl) else "no"
+                    if info.get("license_reference"):
+                        entry["license_reference"] = str(info["license_reference"])
                 entry.update(info_extras(info))
                 bad = []
                 if sha and info.get("sha256") and str(info["sha256"]).strip().lower() != sha:
@@ -1001,7 +1071,8 @@ def models(graph, executed, compute_hashes, info_entries, show, warn, self_id=No
     return result
 
 
-INFO_EXTRA_KEYS = ("type", "name", "version", "released", "base_model", "trigger_words", "recommended", "checked")
+INFO_EXTRA_KEYS = ("type", "name", "version", "released", "base_model", "trigger_words", "recommended", "checked",
+                   "creator", "attribution", "training_data")
 
 
 def info_extras(info):
@@ -1238,7 +1309,8 @@ def resolution(source_image, output_image, fps, samplers):
 # Main entry
 # --------------------------------------------------------------------------
 def collect(prompt, extra_pnginfo, unique_id, manual, compute_model_hashes, model_info_file,
-            include_full_paths, source_image=None, output_image=None, fps=0.0, execution_list=None):
+            include_full_paths, source_image=None, output_image=None, fps=0.0, execution_list=None,
+            production_context=None):
     warnings = []
     show = PathDisplay(include_full_paths)
 
@@ -1294,5 +1366,36 @@ def collect(prompt, extra_pnginfo, unique_id, manual, compute_model_hashes, mode
             warn(f"{s['node_type']} #{s['node_id']}: {k} not resolvable to a constant ({note})")
     data["resolution"], data["video"] = section(
         "Resolution", lambda: resolution(source_image, output_image, fps, data["sampling"]), ({}, None))
+
+    # ---- 1.2.0: second pass + assessment ------------------------------------------
+    from . import assess as A
+
+    wf_nodes = section("Workflow nodes", lambda: A.workflow_nodes(extra_pnginfo), {})
+    data["input_assets"] = section("Input files", lambda: A.input_assets(graph, executed, show, warn,
+                                                                         bool(compute_model_hashes)), [])
+    settings_full, notable, secrets = section("Node settings", lambda: A.node_settings(graph, executed, show, warn),
+                                              ({}, [], []))
+    data["node_settings"], data["notable_settings"], data["secrets"] = settings_full, notable, secrets
+    data["output_nodes"] = section("Output nodes", lambda: A.output_nodes(graph, executed, show), [])
+    data["inactive_nodes"] = section("Inactive nodes", lambda: A.inactive_nodes(graph, executed, wf_nodes, show), [])
+    sm = section("Seed mode", lambda: A.seed_mode(wf_nodes, A.seed_node_ids(graph, data["sampling"])), (None, None))
+    if sm[0]:
+        data["seed_mode"] = {"mode": sm[0], "node_id": sm[1]}
+    data["workflow_type"] = section("Workflow type", lambda: A.classify(graph, executed, data["models"],
+                                                                        data["sampling"], data["api_nodes"]), [])
+    data["capabilities"] = section("Capabilities", lambda: A.capabilities(graph, executed, data["models"]), [])
+    data["external_services"] = section("External services", lambda: A.external_services(
+        data["api_nodes"], data["input_assets"], settings_full), [])
+    ctx = production_context if isinstance(production_context, dict) and production_context else None
+    if ctx:
+        data["context"] = {k: show.text(v) if isinstance(v, str) else v for k, v in ctx.items()}
+    data["environment_declared"] = A.effective_environment(ctx, data["api_nodes"])
+    data["reproducibility"] = section("Reproducibility", lambda: A.reproducibility(data),
+                                      {"status": "indeterminate", "missing": []})
+
+    def _assess():
+        return A.assess(data, ctx)
+
+    data["findings"], data["triage"], data["principles"] = section("Assessment", _assess, ([], None, []))
     data["warnings"] = warnings
     return data

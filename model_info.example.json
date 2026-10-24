@@ -1,5 +1,5 @@
 {
-  "_comment": "Pertineo VFX – model_info file. Copy to <ComfyUI user dir>/pertineo_vfx/model_info.json (used automatically) or point 'model_info_file' to your copy. Keys: SHA256 (best, survives renaming), AutoV2, path relative to the model folder, or file name; the optional 'file' field is matched too. Keys starting with '_' are ignored. All fields are optional – fill in what YOU have verified, the nodes never guess. The entries below are placeholders, not real license statements. '_disclaimer' is shown in every report that uses this file – adapt it to your own wording.",
+  "_comment": "Pertineo VFX – model_info file. Copy to <ComfyUI user dir>/pertineo_vfx/model_info.json (used automatically) or point 'model_info_file' to your copy. Keys: SHA256 (best, survives renaming), AutoV2, path relative to the model folder, or file name; the optional 'file' field is matched too. A 'file' with * or ? (e.g. \"*minimax_h3*\") is a family row: it covers every matching file, an entry for the exact file wins and only takes the fields it leaves empty from the family row. Keys starting with '_' are ignored. All fields are optional – fill in what YOU have verified, the nodes never guess. The entries below are placeholders, not real license statements. '_disclaimer' is shown in every report that uses this file – adapt it to your own wording.",
   "_disclaimer": "All information in this file was compiled to the best of my knowledge from the sources named per model, as of the date given under 'checked'. It is provided without any warranty of accuracy, completeness or currency and is not legal advice. Licenses can change; the license published by the model's author always prevails. Check the original license before any commercial use.",
   "models": {
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
@@ -7,10 +7,14 @@
       "name": "Example model",
       "base_model": "<base model, e.g. Krea2>",
       "source": "https://huggingface.co/<organisation>/<repository>",
+      "creator": "<author / publisher>",
       "license": "<license name and version, as stated on the model page>",
       "commercial_use": "yes | no | restricted | unclear",
       "checked": "YYYY-MM-DD",
-      "notes": "Restrictions that apply to client work."
+      "separate_license": "no",
+      "notes": "Restrictions that apply to client work.",
+      "attribution": "<required credit, if any>",
+      "training_data": "<as stated by the author>"
     },
     "example-lora.safetensors": {
       "file": "loras/SDXL/example-lora.safetensors",
@@ -26,6 +30,18 @@
       "commercial_use": "restricted",
       "checked": "YYYY-MM-DD",
       "notes": "Keyed by file name: matches any folder. Prefer SHA256 keys for audit-proof records."
+    },
+    "example-family": {
+      "file": "*example_family*",
+      "name": "Example model family (all matching files)",
+      "source": "https://<model page>",
+      "creator": "<author / publisher>",
+      "license": "<public license of the family>",
+      "commercial_use": "no",
+      "separate_license": "yes",
+      "license_reference": "<agreement / approval no., date>",
+      "checked": "YYYY-MM-DD",
+      "notes": "Family row: applies to every file whose name matches the pattern. Commercial use under the public license is 'no', but a separate license is on file – the report then shows 'covered by a separate license'."
     }
   }
 }

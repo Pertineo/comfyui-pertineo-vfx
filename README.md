@@ -113,18 +113,19 @@ Whether and how such dataset terms bind end users is legally not settled, and th
 
 ## Audit – document how an image was made
 
-Two nodes that record **what an image was made with** – for clients, license questions and your own traceability – and save image and report with the **same base name**.
+Nodes that record **what an image was made with** – for clients, license questions, studio GenAI reviews and your own traceability – and save image and report with the **same base name**.
 
 ```
 … ──► VAE Decode ──┬──────────────────────────────► Save Image + Metadata ──► shot_001.png
-                   └─► Collect Metadata ──text/json─┘                         shot_001.txt / .json
+                   └─► Collect Metadata ──text/json─┘                         shot_001.txt / .json / .pdf
+Production Context ──┘
 ```
 
 | Node | Purpose |
 |---|---|
-| **Pertineo Collect Metadata** | Reads the executed graph at run time (no widgets needed) and collects: environment (ComfyUI, frontend, Python, torch, CUDA, GPU, OS), every model file with **SHA256** and **AutoV2** (Civitai short hash), **source / license / commercial use** from your `model_info` table, custom node packages with versions, API nodes, sampler settings (seed, steps, cfg / guidance, sampler, scheduler, denoise, latent size), positive and negative prompts per sampler, and source / generation / final resolution (plus frames, fps and duration for video). Adds five manual audit fields. Outputs `metadata_text` and `metadata_json`. |
-| **Pertineo Save Image + Metadata** | Saves the images plus `.txt` and/or `.json` with **guaranteed identical base names**: the counter skips every number where an image, `.txt` or `.json` already exists, so `name_004.png` can never sit next to `name_003.txt`. Every image of a batch gets its own pair (the report states the batch index). Never overwrites. PNG 8 bit, PNG 16 bit or EXR 32-bit float. Embeds prompt and workflow like the core Save Image node. |
-
+| **Pertineo Collect Metadata** | Reads the executed graph at run time (no widgets needed) and collects: environment (ComfyUI, frontend, Python, torch, CUDA, GPU, OS), every model file with **SHA256** and **AutoV2** (Civitai short hash), **source / license / commercial use** from your `model_info` table, custom node packages with versions, API nodes, sampler settings (seed, steps, cfg / guidance, sampler, scheduler, denoise, latent size), positive and negative prompts per sampler, and source / generation / final resolution (plus frames, fps and duration for video). In addition: input files with SHA256, bypassed / muted / unconnected nodes (listed as *not part of the run*), seed control mode, the settings of every executed node (credentials redacted), save nodes, workflow type, identity-related capabilities (face swap, identity adapters, voice / lip-sync …), reproducibility, and **findings with severity and the department they belong to**, an indicative **triage (A–D)** and five **guiding principles**. Adds five manual audit fields. Outputs `metadata_text` and `metadata_json`. |
+| **Pertineo Production Context** | Declares the production context: production, project / episode, shot, purpose (ideation … final deliverable), final cut, story-critical, execution environment, unreleased material, personal data, talent likeness / voice, third-party material, trademarks, union-covered work, whether external tools store / train on the data, which approvals and consents are available, and the reviewers. Connect to `production_context` of Collect Metadata. Everything here is recorded as **declared**, never as verified. |
+| **Pertineo Save Image + Metadata** | Saves the images plus `.txt` and/or `.json` with **guaranteed identical base names**: the counter skips every number where an image, `.txt` or `.json` already exists, so `name_004.png` can never sit next to `name_003.txt`. Every image of a batch gets its own pair (the report states the batch index). Never overwrites. PNG 8 bit, PNG 16 bit or EXR 32-bit float. Embeds prompt and workflow like the core Save Image node. Optional **PDF** of the report (A4, with a thumbnail). |
 | **Pertineo LoRA Loader + Info** | Loads a LoRA like the core LoRA loader and additionally outputs what your `model_info` table says about it: `trigger_words` (comma-separated, ready to join into a prompt), `base_model` and a short `info` text with license and source. The LoRA is chosen only once, so loader and info always match. `clip` is optional (model-only LoRAs). A missing entry never stops the run. |
 | **Pertineo Model Info (…)** | Look up your own records without loading anything: one node per model type (LoRA, Checkpoint, Diffusion Model, VAE, Text Encoder, ControlNet, Upscaler), each with the same file list as the matching loader. Outputs `name`, `base_model`, `trigger_words`, `recommended`, `license` and an `info` text – connect `info` to *Preview Any* to read it. Useful for LoRAs loaded by other loaders and for recommended settings of a checkpoint. Not listed as a model in the audit report, as it loads nothing. |
 
@@ -132,7 +133,7 @@ An example is in `example_workflows/audit_example.json`.
 
 ### Example report (shortened)
 
-The `.txt` is laid out for people: open points first, then the models and their licenses, how the image was generated, your own declarations, and the technical environment last. The `.json` holds the same content for machines.
+The `.txt` is laid out for people: the indicative triage and the open points first, then the declared production context, the models and their licenses, inputs, how the image was generated, outputs, inactive nodes, guiding principles, your own declarations, and the technical environment last. The `.json` holds the same content for machines (plus all node settings); the optional `.pdf` is the `.txt` on A4 pages.
 
 ```
 AUDIT REPORT – Julia Kietzmann (Pertineo)
@@ -145,73 +146,94 @@ AUDIT REPORT – Julia Kietzmann (Pertineo)
   Author            Julia Kietzmann
   Company           Pertineo
   Purpose           Character insert, shot 010
+  Production        Example feature
+
+
+INDICATIVE TRIAGE ────────────────────────────────────────────────────────────
+
+  [ C ]  WRITTEN APPROVAL INDICATED
+  Why               2 written-approval trigger(s)
+  Open points       Production / studio approval 2 · Legal / rights 1
+  Findings          2 high · 1 medium · 2 low
+  Reproducibility   reproducible
+
+  Indicative first assessment derived only from the declared production
+  context and what the workflow shows. It is not an approval, not legal
+  advice and not an official studio assessment.
 
 
 TO CHECK ─────────────────────────────────────────────────────────────────────
 
-  • 1 of 3 model(s) without source / license – add them to the model_info file.
-  • Not filled in: Changes outside ComfyUI.
+  • [HIGH] Generated material is intended for final delivery / the final cut –
+    written approval is usually required.
+      → Production / studio approval · declared
+  • [MEDIUM] 1 of 3 model(s) without source / license in the model_info file:
+    clip_l.safetensors
+      → Legal / rights · external evidence required
+  • [LOW] MiniMax H3: commercial use 'no' under the public license – covered by
+    a separate license (agreement 2026-07). Keep the agreement on file.
+      → Legal / rights · declared
+  …
 
 
 MODELS (3) ───────────────────────────────────────────────────────────────────
 
-  1. Diffusion model
-    File              diffusion_models/krea2.safetensors
+  1. Diffusion model – MiniMax H3
+    File              diffusion_models/minimax_h3_t2i.safetensors
     SHA256            9d5b02fa8990d1b776a54022fd672f6a5f2fdaa2ea151cca7a8a71e68b618b7d
     AutoV2            9D5B02FA89
     Source            https://huggingface.co/…
     License           …
-    Commercial use    yes
+    Commercial use    no
+    Separate license  yes – agreement 2026-07
+    Family row        *minimax_h3*
     Loaded by         UNETLoader #17
   …
 
 
 GENERATION ───────────────────────────────────────────────────────────────────
 
+  Workflow type     image-to-image
+  Seed control      fixed (frontend setting, #10)
+
   KSampler #10
     Seed              0
     Steps             30
-    CFG               1
-    Sampler           res_multistep
-    Scheduler         simple
-    Denoise           1
-    Latent            encoded source image  (VAEEncode #11)
-    Positive prompt   …
-    Negative prompt   …
-
-  Source image      6144 x 4096
-  Generated at      6144 x 4096  (encoded source image)
-  Final image       6144 x 4096  (2 images)
+    …
 
 
-DECLARED BY THE AUTHOR ───────────────────────────────────────────────────────
+GUIDING PRINCIPLES (INDICATIVE) ──────────────────────────────────────────────
 
-  Reference images          plate from client, delivered 2026-10-20
-  External software         Nuke 16 (comp)
-  Changes outside ComfyUI   – not provided –
-  Notes                     – not provided –
-
-
-SOFTWARE AND HARDWARE ────────────────────────────────────────────────────────
-
-  ComfyUI           0.42.0 (git 1a82e6d)
-  Frontend          1.57.1
-  Python / torch    3.12.3 / 2.14.1+cu130 · CUDA 13.0
-  GPU               NVIDIA GeForce RTX 5090 (31.4 GiB)
-  OS                Linux Mint 22.3 · kernel 7.0.0-38-generic
-  API nodes         none (everything ran locally)
-
-  Node packages used:
-    comfy-core  0.42.0
-      CheckpointLoaderSimple, CLIPTextEncode ×2, KSampler, …
-    rgthree-comfy  1.0.2610050029
-      KSampler Config (rgthree)
+  P1 UNKNOWN  Output does not replicate unowned or copyrighted material –
+              inputs not fully declared; the output itself needs visual review
+  P2 YES      Tools do not store, reuse or train on production data – no API /
+              cloud nodes in the run (observed)
+  …
 ```
+
+### Findings, triage and guiding principles
+
+Every open point is a **finding** with a severity (`critical`, `high`, `medium`, `low`), the **department** it belongs to (Legal / rights, Talent & consent, Data protection / IT security, Production / studio approval, VFX supervision / QC, Documentation) and its evidence class: `observed` (seen in the graph), `derived` (concluded from it), `declared` (your statement in the model_info file or Production Context) or `external evidence required`.
+
+The **indicative triage** sums this up – like a traffic light:
+
+| | | When |
+|---|---|---|
+| **A** | Low-risk candidate | Declared as ideation / temporary reference / R&D, not in the final cut, no trigger, no open point of medium severity or higher. |
+| **B** | Review required | Open points remain (unknown licenses, API nodes, undeclared answers, internal asset or marketing use …). |
+| **C** | Written approval indicated | A typical trigger for written approval: final deliverable or final cut, story-critical, unreleased material or personal data in GenAI, talent likeness or voice, union-covered work, third-party material without documented rights, external tools that train on the data, or a credential found in the workflow. |
+| **D** | Indeterminate | No Production Context connected, or purpose and final cut both unknown. |
+
+The five **guiding principles** (P1 output does not replicate unowned material, P2 tools do not store / train on production data, P3 secured environment, P4 temporary material, P5 no talent or union work replaced without consent) are answered `YES` / `NO` / `UNKNOWN` with the reason. `YES` needs evidence or an explicit declaration – never just the absence of a contrary finding.
+
+**Triage and principles are an orientation for the people who decide** – derived only from your declarations and the graph. They are not an approval, not legal advice and not an official studio or vendor assessment. The report says so in every file.
 
 ### How values are found
 
 - **Linked widgets** (e.g. steps and cfg from *KSampler Config (rgthree)*, a seed from a primitive or seed node, a value behind a boolean switch) are followed upstream to the constant. If a value is **computed** (text concatenation, math, an LLM, trigger words from LoRA Loader + Info …), the report shows the value that node actually produced **in this run**, taken from ComfyUI's output cache. For that, Collect Metadata has to run after those nodes – connect `output_image` (the final image), then it always runs last. If no run value is available, nothing is guessed – the report says `linked from <node type> #<id>, output <name>`.
-- Only nodes that actually contribute to an output are listed. **Bypassed or muted nodes** are not part of the run and do not appear. Frontend-only nodes (KJNodes Set/Get, reroutes) are resolved by ComfyUI itself. Subgraph node ids (`12:5`) work.
+- Only nodes that actually contribute to an output count as part of the run. **Bypassed, muted and unconnected nodes** are listed separately under *Inactive nodes – not part of the run* (bypassed loaders with their model file), so a reviewer sees what was switched off.
+- **Input files** (images, videos, audio, sequence folders) are listed with role and SHA256 – files in the ComfyUI input folder as `<input>/…`.
+- **Credentials:** inputs that look like an API key or token are replaced by `REDACTED` in the report and raise a critical finding – they are still in the embedded workflow, remove them before sharing. Frontend-only nodes (KJNodes Set/Get, reroutes) are resolved by ComfyUI itself. Subgraph node ids (`12:5`) work.
 - **Packages and versions** come from the node properties ComfyUI stores in the workflow (`cnr_id` / `ver`, or `aux_id` for git installs); otherwise from the folder the node is installed in.
 - **Hashes** are cached in `<ComfyUI user dir>/pertineo_vfx/model_hash_cache.json` (key: path + size + modification time). The first run hashes large models once; later runs are instant. A changed or replaced file is hashed again.
 - **Nothing stops the generation:** unreadable files, missing models or a broken `model_info` file become warnings in the report and the console.
@@ -229,7 +251,7 @@ The nodes never look up or guess licenses. You keep a table with what you have v
 
 - **Location:** leave `model_info_file` empty to use `<ComfyUI user dir>/pertineo_vfx/model_info.ods` (then `.xlsx`, `.csv`, `.json` – the first one found). **If none exists, an empty `model_info.csv` with just the header row is created there on the first run.** Open it in Calc and use *Save As* → `.ods` if you want formatting. You can also enter any path (relative paths are relative to that folder).
 - **Templates** ship with the package: `model_info.example.ods` and `.csv` (empty, with headers and a hint row) and `model_info.example.json` (placeholder entries showing the JSON structure).
-- **Layout:** the header row is found automatically (the first row with at least three known column names), so you can put a title, notes or a disclaimer above it. Column order is free; header names are matched loosely (`Base model`, `base_model`, `Trigger words`, `Filename`, `SHA256` …). Only the first sheet is read; formatting is ignored. Rows below the header count as a model only if they have a 64-character SHA256 or a file name with an extension – hint or example rows are skipped. Rows starting with `#` are ignored.
+- **Layout:** the header row is found automatically (the first row with at least three known column names), so you can put a title, notes or a disclaimer above it. Column order is free; header names are matched loosely (`Base model`, `base_model`, `Trigger words`, `Filename`, `SHA256` …). Only the first sheet is read; formatting is ignored. Rows below the header count as a model only if they have a 64-character SHA256, a file name with an extension or a file pattern (family row, see below) – hint or example rows are skipped. Rows starting with `#` are ignored.
 - **Disclaimer:** a row starting with `Disclaimer:` (text in the same cell or the next one) is your "no warranty" note.
 - **Trigger words:** comma separated as on Civitai; use `;` only if a single trigger word contains a comma.
 - **Spreadsheets:** import CSV columns as **Text** and turn off "detect scientific notation" – otherwise a hash like `12345E6789` may become a number.
@@ -252,28 +274,35 @@ Columns / fields per model – all optional, empty fields count as UNKNOWN:
 | `license` | License as stated by the author | yes |
 | `commercial_use` | `yes` / `no` / `restricted` / `unclear` | yes |
 | `checked` | When you last checked the license | yes |
+| `separate_license` | `yes` / `no` – you have your own agreement with the author (e.g. a commercial license or written approval). With `yes`, a model whose public license says commercial use `no` / `restricted` is shown as *covered by a separate license* instead of an open point. | yes |
+| `license_reference` | Where that agreement is documented: contract or approval number, date | yes |
+| `creator` | Author / publisher of the model | yes |
+| `attribution` | Credit the license requires, if any – listed as a finding for Production | yes |
+| `training_data` | Training data as stated by the author | yes |
 | `notes` | Anything else | yes |
 
 - Identify models by **SHA256** (recommended – survives renaming; copy it from the first report) or by `file` (path relative to the model folder, or just the file name). If `sha256` / `autov2` is given and does not match the actual file, the report says so.
 - **Disclaimer** (optional): your own "no warranty" note (JSON: `_disclaimer`). It is printed in every report that uses the file. Independently, every report ends with a fixed note that license data comes from the user's own file, is not verified by Pertineo VFX, comes without warranty and is not legal advice.
+- **Family rows:** one row can cover a whole model family. Put a pattern with `*` (any text) or `?` (one character) in `file`, e.g. `*minimax_h3*` – it matches every model file whose name or path contains `minimax_h3` (case-insensitive). A row for the exact file (SHA256 / file name) always wins; only the cells it leaves empty are taken from the family row. Per-file fields (name, version, released, hashes, trigger words, recommended) are never inherited. Typical use: license, source and separate license once in the family row, base model and trigger words per file. The report names the family row that was used.
 - Models without an entry are marked **`UNKNOWN – add to model_info file`** and listed under *To check*, so you see at once what is still missing.
 
 ### Sharing reports and images
 
 - `include_full_paths` is **off** by default: reports contain only file names and sub folders relative to the model folder (`diffusion_models/3D/model.safetensors`), no local paths like `/mnt/…` or your home folder. Turn it on for purely internal records.
 - `embed_workflow` writes the workflow into the PNG as the core Save Image node does. The workflow contains everything typed into any node – including local paths in other nodes' widgets. For anonymised sharing turn `embed_workflow` off and pass on the `.txt` / `.json`.
-- The report documents what ComfyUI saw. Manual fields (reference images, external software, changes outside ComfyUI) are your statement – fill them in before delivering.
+- The report documents what ComfyUI saw. Manual fields (reference images, external software, changes outside ComfyUI) and the Production Context are your statement – fill them in before delivering.
 
 ### Parameters
 
 | Node | Parameter | Default | |
 |---|---|---|---|
-| Collect | `workflow_purpose`, `reference_image_sources`, `external_software`, `changes_outside_comfyui`, `notes` | empty | Manual audit fields. Empty = `– not provided –`. |
+| Collect | `workflow_purpose`, `reference_image_sources`, `external_software`, `changes_outside_comfyui`, `notes` | empty | Manual audit fields. Write `none` if there is nothing to declare; empty = `UNKNOWN – not provided`. |
 | Collect | `compute_model_hashes` | on | SHA256 + AutoV2 per model file (cached). |
 | Collect | `model_info_file` | empty | Your license / source database, see above. |
 | Collect | `include_full_paths` | off | Absolute paths in the report – only for internal use. |
 | Collect | `source_image`, `output_image`, `fps` | – | Optional, for resolutions; `fps` > 0 adds frames and duration. |
 | Collect | `author`, `company` | empty | Who is responsible for the image. Shown in the title (`AUDIT REPORT – Name (Company)`) and header. The footer always names the tool (`Report by Pertineo VFX`). |
+| Collect | `production_context` | – | Optional, from *Pertineo Production Context*. Without it the triage is D (indeterminate). |
 | Collect | `include_author` | on | Off = author and company are left out of `.txt` and `.json` (they stay in the node). An embedded workflow still contains all widget values – also turn off `embed_workflow` if the name must not appear anywhere. |
 | Save | `output_folder` | empty | Empty = ComfyUI output folder, relative = inside it, absolute allowed. |
 | Save | `filename_prefix` | audit | Can be linked. A trailing image extension is removed; `sub/name` writes into a sub folder. |
@@ -281,10 +310,11 @@ Columns / fields per model – all optional, empty fields count as UNKNOWN:
 | Save | `format` | png (8 bit) | PNG 8 bit, PNG 16 bit, EXR 32-bit float (converted from sRGB to linear, no embedded workflow; needs OpenEXR). |
 | Save | `embed_workflow` | on | PNG: prompt, workflow and audit JSON in the file. |
 | Save | `write_txt` / `write_json` | on / off | Which sidecar files to write. |
+| Save | `write_pdf` | off | Also write the report as `.pdf` (A4, thumbnail of the image on page 1, no extra dependency). The PDF uses a standard font that only covers Western European characters: Chinese, Japanese, Cyrillic or emoji (e.g. in a prompt) become `?` and the PDF says so at the top – the `.txt` and `.json` keep the complete text. |
 
 Outputs of Save: `saved_basename` (name without extension, one per line for batches) and `saved_paths` (all written files).
 
-Note: Collect Metadata runs on every queue (the graph and model files are invisible to ComfyUI's cache), so every run writes a new file pair.
+Note: Collect Metadata runs on every queue (the graph and model files are invisible to ComfyUI's cache), so every run writes a new set of files.
 
 ---
 

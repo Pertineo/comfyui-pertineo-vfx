@@ -21,16 +21,19 @@ import folder_paths
 from ..common import LOG
 from ..image_io.readwrite import clean_path
 from . import collect as C
+from . import context as K
+from .pdf import write_pdf as write_pdf_file
 from .imagefile import FORMATS, ext_for, write_exr_rgb, write_png8, write_png16
 from .report import HEADER, render
 
 CATEGORY = "Pertineo/Audit"
-SIDECAR_EXTS = (".txt", ".json")
+SIDECAR_EXTS = (".txt", ".json", ".pdf")
 ALL_EXTS = (".png", ".exr") + SIDECAR_EXTS
 _IMAGE_EXT_RE = re.compile(r"\.(png|jpe?g|webp|tiff?|exr|bmp|gif)$", re.I)
 
 _EMBED_NOTE_SHOWN = False
-_MANUAL_TIP = " Leave empty if not applicable – the report then shows '– not provided –'."
+_MANUAL_TIP = (" Write 'none' if there is nothing to declare. Empty = the report shows 'UNKNOWN – not "
+               "provided'.")
 
 
 # --------------------------------------------------------------------------
@@ -96,6 +99,9 @@ class PertineoCollectMetadata:
                                "of the report (they stay in the node). Note: an embedded workflow still contains "
                                "every widget value – turn off embed_workflow on the save node as well if the name "
                                "must not appear anywhere."}),
+                "production_context": ("PERTINEO_CONTEXT", {
+                    "tooltip": "Optional: connect 'Pertineo Production Context' for the declared purpose, rights and "
+                               "consent. Without it the triage is D (indeterminate)."}),
             },
             # EXECUTION_LIST gives access to values other nodes produced in this run (e.g. a prompt
             # joined by a text node) – used only where a value cannot be read from the graph itself.
@@ -111,7 +117,7 @@ class PertineoCollectMetadata:
     def run(self, workflow_purpose, reference_image_sources, external_software, changes_outside_comfyui, notes,
             compute_model_hashes, model_info_file, include_full_paths, source_image=None, output_image=None,
             fps=0.0, author="", company="", include_author=True, prompt=None, extra_pnginfo=None, unique_id=None,
-            execution_list=None):
+            execution_list=None, production_context=None):
         manual = {"workflow_purpose": workflow_purpose, "reference_image_sources": reference_image_sources,
                   "external_software": external_software, "changes_outside_comfyui": changes_outside_comfyui,
                   "notes": notes}
@@ -122,7 +128,7 @@ class PertineoCollectMetadata:
         try:
             data = C.collect(prompt, extra_pnginfo, str(unique_id) if unique_id is not None else None, manual,
                              compute_model_hashes, model_info_file, include_full_paths,
-                             source_image, output_image, fps, execution_list)
+                             source_image, output_image, fps, execution_list, production_context)
         except Exception as e:  # last line of defence: never stop the generation
             traceback.print_exc()
             data = {"schema": C.SCHEMA, "generated": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -137,6 +143,49 @@ class PertineoCollectMetadata:
         n_models = len(data.get("models") or [])
         print(f"{LOG} Audit: {n_models} model file(s), {len(data.get('warnings') or [])} warning(s)")
         return (text, json.dumps(data, indent=2, ensure_ascii=False, default=str))
+
+
+# --------------------------------------------------------------------------
+# Production Context
+# --------------------------------------------------------------------------
+class PertineoProductionContext:
+    """Declared production context (purpose, rights, consent, review). Everything here is a declaration
+    by the user – the report marks it as 'declared', never as verified."""
+
+    CATEGORY = CATEGORY
+    RETURN_TYPES = ("PERTINEO_CONTEXT",)
+    RETURN_NAMES = ("production_context",)
+    FUNCTION = "run"
+    DESCRIPTION = ("Declares the production context of this run – production, shot, purpose, whether material "
+                   "goes into the final cut, rights and consent, reviewers. Connect it to 'Pertineo Collect "
+                   "Metadata'. It feeds the findings, the indicative triage (A–D) and the guiding principles in "
+                   "the report. Declarations are recorded as such – this is not an approval.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        req = {}
+        for key, label in K.TEXT_FIELDS:
+            req[key] = ("STRING", {"default": "", "placeholder": label.upper(),
+                                   "tooltip": f"{label}. Leave empty if not applicable."})
+        for key, label, answers, default in K.CHOICE_FIELDS:
+            req[key] = (list(answers), {"default": default,
+                                        "tooltip": K.TOOLTIPS.get(key, label + ".")})
+        for key, label in K.REVIEWER_FIELDS:
+            req[key] = ("STRING", {"default": "", "placeholder": label.upper(),
+                                   "tooltip": f"{label}: name or role. Empty = not reviewed yet."})
+        req["context_notes"] = ("STRING", {"default": "", "multiline": True, "placeholder": "CONTEXT NOTES",
+                                           "tooltip": "Anything else about rights, approvals or restrictions."})
+        return {"required": req}
+
+    def run(self, **kw):
+        ctx = {}
+        for key, _l in K.TEXT_FIELDS + K.REVIEWER_FIELDS + [("context_notes", "")]:
+            v = kw.get(key, "")
+            ctx[key] = v.strip() if isinstance(v, str) else ""
+        for key, _l, answers, default in K.CHOICE_FIELDS:
+            v = kw.get(key, default)
+            ctx[key] = v if v in answers else default
+        return (ctx,)
 
 
 # --------------------------------------------------------------------------
@@ -276,12 +325,17 @@ class PertineoSaveImageMetadata:
                     "tooltip": "metadata_text from Pertineo Collect Metadata."}),
                 "metadata_json": ("STRING", {"forceInput": True,
                     "tooltip": "metadata_json from Pertineo Collect Metadata."}),
+                "write_pdf": ("BOOLEAN", {"default": False,
+                    "tooltip": "Also write <name>.pdf: the readable report on A4 pages with a thumbnail of the "
+                               "image. Uses a standard PDF font – characters outside Western European scripts "
+                               "(e.g. Chinese) are shown as '?' with a note; the .txt / .json keep them."}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
     def run(self, images, output_folder, filename_prefix, counter_digits, format, embed_workflow, write_txt,
-            write_json, metadata_text=None, metadata_json=None, prompt=None, extra_pnginfo=None):
+            write_json, metadata_text=None, metadata_json=None, write_pdf=False, prompt=None,
+            extra_pnginfo=None):
         folder, prefix = _resolve_output(output_folder, filename_prefix)
         os.makedirs(folder, exist_ok=True)
         ext = ext_for(format)
@@ -334,8 +388,8 @@ class PertineoSaveImageMetadata:
                     pass
                 raise
             written = [path]
-            if write_txt:
-                p = os.path.join(folder, base + ".txt")
+            txt = None
+            if write_txt or write_pdf:
                 if isinstance(meta, dict) and meta.get("schema") == C.SCHEMA:
                     try:  # re-render from the JSON so the file block sits in the header
                         txt = render(per_json)
@@ -344,9 +398,26 @@ class PertineoSaveImageMetadata:
                         txt = _text_for(metadata_text, file_line)
                 else:
                     txt = _text_for(metadata_text, file_line)
+            if write_txt:
+                p = os.path.join(folder, base + ".txt")
                 with open(p, "x", encoding="utf-8") as f:
                     f.write(txt)
                 written.append(p)
+            if write_pdf:
+                p = os.path.join(folder, base + ".pdf")
+                try:
+                    thumb = (np.clip(img[..., :3], 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+                    if thumb.shape[-1] == 1:
+                        thumb = np.repeat(thumb, 3, axis=-1)
+                    author = ((per_json or {}).get("manual") or {}).get("author")
+                    bad = write_pdf_file(p, txt, title=f"Audit report {base}", thumbnail=thumb, author=author)
+                    if bad:
+                        print(f"{LOG} Audit: {bad} character(s) cannot be shown in the PDF font – replaced by '?' "
+                              f"(see note in the PDF; the .txt keeps them).")
+                    written.append(p)
+                except Exception as e:
+                    traceback.print_exc()
+                    print(f"{LOG} Audit: PDF could not be written ({type(e).__name__}: {e})")
             if write_json:
                 p = os.path.join(folder, base + ".json")
                 with open(p, "x", encoding="utf-8") as f:
@@ -399,7 +470,7 @@ def model_info_lookup(folder, rel_name, model_info_file, lookup_by_hash):
             full = folder_paths.get_full_path(folder, rel_name)
             if full:
                 sha, _cached = C.hashing.sha256_file(full, label=os.path.basename(rel_name))
-        info, _matched = C.lookup_model_info(entries, sha, rel_name)
+        info, _matched = C.lookup_model_info(entries, sha, rel_name, f"{folder}/{rel_name}")
         if info is None:
             notes.append(f"No model_info entry for {folder}/{rel_name}.")
             return {}, None, " ".join(notes)
@@ -431,6 +502,12 @@ def info_outputs(folder, rel_name, model_info_file, lookup_by_hash, label):
             lines.append(f"Recommended: {extras['recommended']}")
         lines.append(f"License: {lic or C.UNKNOWN_INFO}")
         lines.append(f"Commercial use: {cu}")
+        if info.get("separate_license") not in (None, ""):
+            sl = "yes" if C._truthy(info["separate_license"]) else "no"
+            ref = f" – {info['license_reference']}" if info.get("license_reference") else ""
+            lines.append(f"Separate license: {sl}{ref}")
+        if info.get("_family"):
+            lines.append(f"Family row: {', '.join(info['_family'])}")
         if info.get("source"):
             lines.append(f"Source: {info['source']}")
         if extras.get("checked"):
@@ -567,12 +644,14 @@ for _suffix, _label, _folder in MODEL_INFO_TYPES:
 
 NODE_CLASS_MAPPINGS = {
     "PertineoCollectMetadata": PertineoCollectMetadata,
+    "PertineoProductionContext": PertineoProductionContext,
     "PertineoSaveImageMetadata": PertineoSaveImageMetadata,
     "PertineoLoraLoaderInfo": PertineoLoraLoaderInfo,
     **{k: v[0] for k, v in MODEL_INFO_CLASSES.items()},
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PertineoCollectMetadata": "Pertineo Collect Metadata",
+    "PertineoProductionContext": "Pertineo Production Context",
     "PertineoSaveImageMetadata": "Pertineo Save Image + Metadata",
     "PertineoLoraLoaderInfo": "Pertineo LoRA Loader + Info",
     **{k: v[1] for k, v in MODEL_INFO_CLASSES.items()},

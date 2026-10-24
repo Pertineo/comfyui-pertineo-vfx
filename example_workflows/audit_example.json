@@ -1,6 +1,6 @@
 {
-  "last_node_id": 9,
-  "last_link_id": 12,
+  "last_node_id": 10,
+  "last_link_id": 13,
   "nodes": [
     {
       "id": 1,
@@ -290,6 +290,12 @@
           "type": "IMAGE",
           "link": 9,
           "shape": 7
+        },
+        {
+          "name": "production_context",
+          "type": "PERTINEO_CONTEXT",
+          "link": 13,
+          "shape": 7
         }
       ],
       "outputs": [
@@ -405,9 +411,65 @@
         "Node name for S&R": "Note"
       },
       "widgets_values": [
-        "Pertineo Collect Metadata + Save Image + Metadata\n\n1. Fill in the manual fields (purpose, references, external software, changes outside ComfyUI). Empty fields show '\u2013 not provided \u2013' in the report.\n\n2. Source and license come from YOUR model_info file: copy model_info.example.json from this package to <ComfyUI user dir>/pertineo_vfx/model_info.json and add your models (key = SHA256 from the first report). Missing entries are marked UNKNOWN.\n\n3. include_full_paths = off (default) for reports you share.\n\n4. Each run writes audit/example_001.png + .txt (+ .json) with the same base name. Nothing is overwritten.\n\nFirst run hashes every model once (large files take a while); later runs use the cache."
+        "Pertineo Collect Metadata + Save Image + Metadata\n\n1. Fill in the manual fields (purpose, references, external software, changes outside ComfyUI). Write 'none' where there is nothing to declare – empty fields show 'UNKNOWN – not provided' in the report.\n\n2. Source and license come from YOUR model_info file: copy model_info.example.json from this package to <ComfyUI user dir>/pertineo_vfx/model_info.json and add your models (key = SHA256 from the first report). Missing entries are marked UNKNOWN.\n\n3. Pertineo Production Context: declare purpose, final cut, rights and consent. It feeds the findings, the indicative triage (A–D) and the guiding principles – an orientation, not an approval.\n\n4. include_full_paths = off (default) for reports you share.\n\n5. Each run writes audit/example_001.png + .txt (+ .json / .pdf) with the same base name. Nothing is overwritten.\n\nFirst run hashes every model once (large files take a while); later runs use the cache."
       ],
       "title": "How to use"
+    },
+    {
+      "id": 10,
+      "type": "PertineoProductionContext",
+      "pos": [
+        400,
+        600
+      ],
+      "size": [
+        400,
+        820
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "production_context",
+          "type": "PERTINEO_CONTEXT",
+          "links": [
+            13
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PertineoProductionContext"
+      },
+      "widgets_values": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "unknown",
+        "unknown",
+        "unknown",
+        "auto (from workflow)",
+        "unknown",
+        "unknown",
+        "unknown",
+        "unknown",
+        "unknown",
+        "unknown",
+        "unknown",
+        "no",
+        "no",
+        "no",
+        "no",
+        "no",
+        "",
+        "",
+        "",
+        ""
+      ]
     }
   ],
   "links": [
@@ -506,6 +568,14 @@
       8,
       2,
       "STRING"
+    ],
+    [
+      13,
+      10,
+      0,
+      7,
+      2,
+      "PERTINEO_CONTEXT"
     ]
   ],
   "groups": [],
