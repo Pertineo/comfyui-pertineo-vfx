@@ -7,6 +7,7 @@
 """Pertineo VFX – Audit nodes (collect metadata, save image + metadata with the same name)."""
 
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -32,8 +33,8 @@ ALL_EXTS = (".png", ".exr") + SIDECAR_EXTS
 _IMAGE_EXT_RE = re.compile(r"\.(png|jpe?g|webp|tiff?|exr|bmp|gif)$", re.I)
 
 _EMBED_NOTE_SHOWN = False
-_MANUAL_TIP = (" Write 'none' if there is nothing to declare. Empty = the report shows 'UNKNOWN – not "
-               "provided'.")
+_MANUAL_TIP = (" Write 'none' if there is nothing to declare. Empty = the report shows 'UNKNOWN / NOT "
+               "VERIFIED – not provided' (notes and planned work: optional, empty stays empty).")
 
 
 # --------------------------------------------------------------------------
@@ -60,12 +61,20 @@ class PertineoCollectMetadata:
             "required": {
                 "workflow_purpose": text("What this workflow / image is for (job, shot, client deliverable).",
                                          "PURPOSE: e.g. character insert for shot 010, client X"),
-                "reference_image_sources": text("Where reference or input images come from and under which rights.",
-                                                "REFERENCES: source and rights of input / reference images"),
-                "external_software": text("Other software used before or after ComfyUI (Nuke, Photoshop, ...).",
-                                          "EXTERNAL SOFTWARE: e.g. Nuke 16 for comp"),
-                "changes_outside_comfyui": text("Manual changes made outside ComfyUI (retouch, comp, grading).",
-                                                "CHANGES OUTSIDE COMFYUI: e.g. retouched hands in Nuke"),
+                "reference_image_sources": text(
+                    "Origin and RIGHTS of the input / reference images – not the file name (input files are listed "
+                    "automatically with their SHA256). E.g. 'Own layout sketch, drawn by me in Krita, no third-party "
+                    "material' or 'Plates delivered by the production, 2026-10-20'.",
+                    "REFERENCES: origin and rights of input images, e.g. own sketch / client plates / licensed stock"),
+                "external_software": text("WHICH other programs were used before or after ComfyUI, e.g. 'Krita (input "
+                                          "layout)', 'Nuke 16 (comp)'.",
+                                          "EXTERNAL SOFTWARE: e.g. Krita (input layout), Nuke 16 (comp)"),
+                "changes_outside_comfyui": text(
+                    "PLANNED work on the result after ComfyUI, e.g. 'comp in Nuke, grading', 'typography finalised in "
+                    "Krita' – tells a reviewer that this image is not the final picture. 'none' if it is delivered as "
+                    "is. Work that has already been done belongs to its own record: an edited image that goes back "
+                    "into a workflow is listed there as an input with its hash.",
+                    "PLANNED WORK OUTSIDE COMFYUI: e.g. comp in Nuke – or 'none'"),
                 "notes": text("Anything else worth recording.", "NOTES"),
                 "compute_model_hashes": ("BOOLEAN", {"default": True,
                     "tooltip": "Compute SHA256 and AutoV2 of every model file. Large files take a while the first "
@@ -77,7 +86,7 @@ class PertineoCollectMetadata:
                                "license, base model, trigger words … per model, keyed by SHA256 or file name (see "
                                "model_info.example.ods). Empty = <ComfyUI user dir>/pertineo_vfx/model_info.ods, "
                                ".xlsx, .csv or .json – an empty model_info.csv is created there if none "
-                               "exists. Relative paths are relative to that folder. Missing entries are UNKNOWN."}),
+                               "exists. Relative paths are relative to that folder. Missing entries are UNKNOWN / NOT VERIFIED."}),
                 "include_full_paths": ("BOOLEAN", {"default": False,
                     "tooltip": "Off (recommended for sharing): only file names and sub folders relative to the "
                                "model folder appear in the report. On: absolute local paths are included."}),
@@ -166,15 +175,15 @@ class PertineoProductionContext:
         req = {}
         for key, label in K.TEXT_FIELDS:
             req[key] = ("STRING", {"default": "", "placeholder": label.upper(),
-                                   "tooltip": f"{label}. Leave empty if not applicable."})
+                                   "tooltip": K.TOOLTIPS.get(key, label + ".") + " Leave empty if not applicable."})
         for key, label, answers, default in K.CHOICE_FIELDS:
             req[key] = (list(answers), {"default": default,
                                         "tooltip": K.TOOLTIPS.get(key, label + ".")})
         for key, label in K.REVIEWER_FIELDS:
             req[key] = ("STRING", {"default": "", "placeholder": label.upper(),
-                                   "tooltip": f"{label}: name or role. Empty = not reviewed yet."})
+                                   "tooltip": K.TOOLTIPS.get(key, f"{label}: name or role. Empty = not reviewed yet.")})
         req["context_notes"] = ("STRING", {"default": "", "multiline": True, "placeholder": "CONTEXT NOTES",
-                                           "tooltip": "Anything else about rights, approvals or restrictions."})
+                                           "tooltip": K.TOOLTIPS["context_notes"]})
         return {"required": req}
 
     def run(self, **kw):
@@ -388,6 +397,18 @@ class PertineoSaveImageMetadata:
                     pass
                 raise
             written = [path]
+            # SHA256 of the saved image: links this report to the next workflow that loads the image
+            # (the same hash then appears there under INPUT FILES). Not part of the PNG-embedded copy.
+            try:
+                hasher = hashlib.sha256()
+                with open(path, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        hasher.update(chunk)
+                file_info["sha256"] = hasher.hexdigest()
+                if per_json is not None:
+                    per_json["file"] = dict(file_info)
+            except OSError as e:
+                print(f"{LOG} Audit: could not hash {path} ({type(e).__name__})")
             txt = None
             if write_txt or write_pdf:
                 if isinstance(meta, dict) and meta.get("schema") == C.SCHEMA:

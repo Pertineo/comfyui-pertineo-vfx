@@ -24,8 +24,8 @@ from ..common import LOG
 from . import hashing
 
 SCHEMA = "pertineo-audit/1"
-UNKNOWN_INFO = "UNKNOWN – add to model_info file"
-NOT_PROVIDED = "UNKNOWN – not provided"
+UNKNOWN_INFO = "UNKNOWN / NOT VERIFIED"
+NOT_PROVIDED = "UNKNOWN / NOT VERIFIED – not provided"
 MODEL_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".sft", ".bin")
 MODEL_INFO_DEFAULT = "model_info.json"
 DISCLAIMER_KEY = "_disclaimer"
@@ -390,6 +390,76 @@ def _installed_version(pkg_dir):
     return ver or (f"git {commit}" if commit else "unknown")
 
 
+_LICENSE_PATTERNS = [
+    (r"GNU AFFERO GENERAL PUBLIC LICENSE", "AGPL-3.0"),
+    (r"GNU LESSER GENERAL PUBLIC LICENSE", "LGPL"),
+    (r"GNU GENERAL PUBLIC LICENSE\s+Version 3", "GPL-3.0"),
+    (r"GNU GENERAL PUBLIC LICENSE\s+Version 2", "GPL-2.0"),
+    (r"Apache License\s+Version 2\.0", "Apache-2.0"),
+    (r"^\s*MIT License|Permission is hereby granted, free of charge", "MIT"),
+    (r"BSD 3-Clause|Redistribution and use in source and binary forms", "BSD"),
+    (r"Mozilla Public License", "MPL-2.0"),
+    (r"Creative Commons", "Creative Commons"),
+    (r"This is free and unencumbered software released into the public domain", "Unlicense"),
+]
+
+
+def package_credits(pkg_dir):
+    """Publisher, license and repository of an installed node package – read from its own files
+    (pyproject.toml, LICENSE, .git/config). Nothing is guessed: what is not stated stays empty."""
+    out = {}
+    try:
+        import tomllib
+
+        with open(os.path.join(pkg_dir, "pyproject.toml"), "rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        data = {}
+    proj = data.get("project") or {}
+    lic = proj.get("license")
+    if isinstance(lic, dict):
+        lic = lic.get("text") or (f"see {lic['file']}" if lic.get("file") else None)
+    if isinstance(lic, str) and lic.strip() and not lic.strip().lower().startswith("see "):
+        out["license"] = lic.strip().splitlines()[0][:80]
+    urls = {str(k).lower(): v for k, v in (proj.get("urls") or {}).items()}
+    for k in ("repository", "source", "homepage", "github"):
+        if urls.get(k):
+            out["repository"] = str(urls[k])
+            break
+    comfy = (data.get("tool") or {}).get("comfy") or {}
+    if comfy.get("PublisherId"):
+        out["publisher"] = str(comfy["PublisherId"])
+    authors = [a.get("name") for a in (proj.get("authors") or []) if isinstance(a, dict) and a.get("name")]
+    if authors:
+        out["authors"] = ", ".join(authors[:3])
+    if "license" not in out:
+        for name in ("LICENSE", "LICENSE.txt", "LICENSE.md", "LICENCE", "COPYING"):
+            p = os.path.join(pkg_dir, name)
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8", errors="replace") as f:
+                        head = f.read(4000)
+                except OSError:
+                    break
+                for pat, lid in _LICENSE_PATTERNS:
+                    if re.search(pat, head, re.I | re.M):
+                        out["license"] = lid
+                        out["license_from"] = name
+                        break
+                break
+    if "repository" not in out:
+        try:
+            with open(os.path.join(pkg_dir, ".git", "config"), "r", encoding="utf-8", errors="replace") as f:
+                m = re.search(r'\[remote "origin"\][^\[]*?url\s*=\s*(\S+)', f.read())
+            if m:
+                url = m.group(1)
+                url = re.sub(r"^git@([^:]+):", r"https://\1/", url)
+                out["repository"] = re.sub(r"\.git$", "", re.sub(r"https://[^@/]+@", "https://", url))
+        except OSError:
+            pass
+    return out
+
+
 def module_package_info(cls, comfy_version):
     """Package and installed version from the file the node class is defined in."""
     try:
@@ -412,11 +482,13 @@ def module_package_info(cls, comfy_version):
             if path.startswith(d + os.sep):
                 pkg = os.path.relpath(path, d).split(os.sep)[0]
                 pkg_dir = os.path.join(d, pkg)
-                return {"package": pkg, "version": _installed_version(pkg_dir), "source": "installed"}
+                return {"package": pkg, "version": _installed_version(pkg_dir), "source": "installed",
+                        "pkg_dir": pkg_dir}
     if os.path.realpath(raw).startswith(_PKG_DIR + os.sep) or raw.startswith(_PKG_DIR + os.sep):
-        return {"package": "comfyui-pertineo-vfx", "version": _installed_version(_PKG_DIR), "source": "installed"}
+        return {"package": "comfyui-pertineo-vfx", "version": _installed_version(_PKG_DIR), "source": "installed",
+                "pkg_dir": _PKG_DIR}
     if base and os.path.realpath(raw).startswith(base + os.sep):
-        return {"package": "comfy-core", "version": comfy_version, "source": "module path"}
+        return {"package": "comfy-core", "version": comfy_version, "source": "module path", "pkg_dir": base}
     return None
 
 
@@ -460,6 +532,11 @@ def custom_nodes(graph, executed, extra_pnginfo, comfy_version, warn):
         key = (info["package"], info["version"])
         g = groups.setdefault(key, {"package": info["package"], "version": info["version"],
                                     "source": info["source"], "node_types": {}})
+        if info.get("pkg_dir") and "credits" not in g:
+            try:
+                g["credits"] = package_credits(info["pkg_dir"])
+            except Exception:
+                g["credits"] = {}
         if info.get("workflow_version"):
             g.setdefault("workflow_version", info["workflow_version"])
         g["node_types"][ct] = g["node_types"].get(ct, 0) + 1
@@ -470,7 +547,7 @@ def custom_nodes(graph, executed, extra_pnginfo, comfy_version, warn):
         g["node_types"] = [{"type": t, "count": c} for t, c in sorted(g["node_types"].items())]
         out.append(g)
     if any(g["package"] == "unknown" for g in out):
-        warn("Package of some node types could not be determined (see Custom Nodes: unknown).")
+        warn("The package of some node types could not be determined (see Node packages used).")
     return out, api
 
 
@@ -554,7 +631,39 @@ def find_model_file(name, input_name, role):
             p = None
         if p:
             return p, folder
+    # LLM / VLM nodes often list only the file name and keep the file in a sub folder of models/LLM
+    # (e.g. LLM/GGUF/Qwen/<repo>/<file>.gguf): search those folders by file name.
+    if role == "vlm" or name.lower().endswith(".gguf"):
+        base = os.path.basename(name.replace("\\", "/"))
+        for key, root in _llm_roots(folder_paths):
+            for dirpath, _dirs, files in os.walk(root, followlinks=True):
+                if base in files:
+                    full = os.path.join(dirpath, base)
+                    rel = os.path.relpath(full, root).replace(os.sep, "/")
+                    return full, f"{key}/{os.path.dirname(rel)}".rstrip("/") if "/" in rel else key
     return None, None
+
+
+def _llm_roots(folder_paths):
+    roots, seen = [], set()
+    keys = [k for k in getattr(folder_paths, "folder_names_and_paths", {}) if k.lower() in ("llm", "llms", "vlm")]
+    for k in keys:
+        try:
+            for r in folder_paths.get_folder_paths(k):
+                roots.append(("LLM", r))
+        except Exception:
+            pass
+    md = getattr(folder_paths, "models_dir", None)
+    if md:
+        for sub in ("LLM", "llm", "VLM"):
+            roots.append(("LLM", os.path.join(md, sub)))
+    out = []
+    for key, r in roots:
+        real = os.path.realpath(r)
+        if os.path.isdir(real) and real not in seen:
+            seen.add(real)
+            out.append((key, r))
+    return out
 
 
 _STRENGTH_KEYS = ("strength_model", "strength_clip", "strength", "lora_strength", "model_strength", "clip_strength",
@@ -882,7 +991,7 @@ def load_model_info(model_info_file, show, warn):
         if note:
             warn(note)
         if path is None:
-            warn("No model_info file – source and license are UNKNOWN for all models.")
+            warn("No model_info file – source and license are UNKNOWN / NOT VERIFIED for all models.")
             return {}, None
     else:
         path = os.path.expanduser(text)
@@ -899,11 +1008,11 @@ def load_model_info(model_info_file, show, warn):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
     except FileNotFoundError:
-        warn(f"model_info file not found: {show.path(path)} – source and license are UNKNOWN.")
+        warn(f"model_info file not found: {show.path(path)} – source and license are UNKNOWN / NOT VERIFIED.")
         return {}, show.path(path)
     except Exception as e:
         warn(f"model_info file unreadable ({show.path(path)}: {type(e).__name__}: {show.text(str(e))}) – "
-             f"source and license are UNKNOWN.")
+             f"source and license are UNKNOWN / NOT VERIFIED.")
         return {}, show.path(path)
     raw = data
     if isinstance(data, dict) and isinstance(data.get("models"), dict):
@@ -1030,45 +1139,238 @@ def models(graph, executed, compute_hashes, info_entries, show, warn, self_id=No
                 except OSError:
                     pass
 
-            info, matched = lookup_model_info(info_entries, sha, name, entry["file"])
-            if info is None:
-                entry["source"] = entry["license"] = entry["commercial_use"] = UNKNOWN_INFO
-                entry["license_notes"] = ""
-                entry["info_matched_by"] = None
-            else:
-                entry["source"] = str(info.get("source") or UNKNOWN_INFO)
-                entry["license"] = str(info.get("license") or UNKNOWN_INFO)
-                cu = info.get("commercial_use")
-                entry["commercial_use"] = UNKNOWN_INFO if cu in (None, "") else (
-                    ("yes" if cu else "no") if isinstance(cu, bool) else str(cu))
-                entry["license_notes"] = str(info.get("notes") or "")
-                if matched is None:
-                    entry["info_matched_by"] = "family " + ", ".join(info.get("_family") or [])
-                else:
-                    entry["info_matched_by"] = "sha256" if sha and matched in (sha.lower(),) else (
-                        "autov2" if sha and matched.lower() == hashing.autov2(sha).lower() else "file name")
-                if info.get("_family"):
-                    entry["family_rows"] = info["_family"]
-                sl = info.get("separate_license")
-                if sl not in (None, ""):
-                    entry["separate_license"] = "yes" if _truthy(sl) else "no"
-                    if info.get("license_reference"):
-                        entry["license_reference"] = str(info["license_reference"])
-                entry.update(info_extras(info))
-                bad = []
-                if sha and info.get("sha256") and str(info["sha256"]).strip().lower() != sha:
-                    bad.append("SHA256")
-                if sha and info.get("autov2") and str(info["autov2"]).strip().upper() != hashing.autov2(sha):
-                    bad.append("AutoV2")
-                if bad:
-                    entry["hash_mismatch"] = bad
-                    warn(f"{entry['file']}: {' and '.join(bad)} in the model_info file {'do' if len(bad) > 1 else 'does'} not match the file "
-                         f"– wrong entry, or the file was replaced.")
+            entry["_full"] = full
+            _apply_info(entry, info_entries, sha, name, warn)
+            _apply_file_meta(entry, full)
             result.append(entry)
+    _mark_prompt_writers(graph, executed, result)
+    _add_vision_projectors(result, compute_hashes, info_entries, show, warn)
+    for m in result:
+        m.pop("_full", None)
     unknown = sorted({m["file"] for m in result if m.get("info_matched_by") is None})
     if unknown and info_entries:
         warn(f"No model_info entry for: {', '.join(unknown)}")
     return result
+
+
+_GENERATOR_RE = re.compile(r"prompt|caption|llm|vlm|generate|describe|textgen|florence|joy|ollama|chat", re.I)
+
+
+def consumers(graph, executed, nid):
+    """Executed nodes that take an output of `nid` as input."""
+    out = []
+    for c in executed:
+        for v in graph.inputs(c).values():
+            if is_link(v) and v[0] == nid:
+                out.append(c)
+                break
+    return out
+
+
+def _safetensors_meta(path):
+    import json as _json
+    import struct
+
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        if n <= 0 or n > 100 * 1024 * 1024:
+            return {}
+        head = _json.loads(f.read(n).decode("utf-8", "replace"))
+    meta = head.get("__metadata__") or {}
+    return {k: str(v) for k, v in meta.items() if isinstance(v, (str, int, float))}
+
+
+def _gguf_meta(path, wanted_prefix="general."):
+    """The 'general.*' key / value pairs at the start of a GGUF file (stops at the first other key)."""
+    import struct
+
+    fmt = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
+
+    class _Stop(Exception):
+        pass
+
+    out = {}
+    with open(path, "rb") as f:
+        if f.read(4) != b"GGUF":
+            return {}
+        version = struct.unpack("<I", f.read(4))[0]
+        if version < 2:
+            return {}
+        f.read(8)  # tensor count
+        kv_count = struct.unpack("<Q", f.read(8))[0]
+
+        def rstr():
+            ln = struct.unpack("<Q", f.read(8))[0]
+            if ln > 1 << 20:
+                raise ValueError("string too long")
+            return f.read(ln).decode("utf-8", "replace")
+
+        def rval(t):
+            if t == 8:
+                return rstr()
+            if t == 9:
+                it, cnt = struct.unpack("<I", f.read(4))[0], struct.unpack("<Q", f.read(8))[0]
+                if cnt > 64:
+                    raise _Stop()  # large arrays (tokenizer) come after general.* – stop here
+                return [rval(it) for _ in range(cnt)]
+            if t in fmt:
+                return struct.unpack(fmt[t], f.read(struct.calcsize(fmt[t])))[0]
+            raise ValueError(f"unknown GGUF type {t}")
+
+        seen_general = False
+        for _ in range(min(kv_count, 4096)):
+            key = rstr()
+            t = struct.unpack("<I", f.read(4))[0]
+            if not key.startswith(wanted_prefix):
+                if seen_general:
+                    break
+                try:
+                    rval(t)
+                except _Stop:
+                    break
+                continue
+            seen_general = True
+            try:
+                v = rval(t)
+            except _Stop:
+                break
+            if isinstance(v, (str, int, float)):
+                out[key] = str(v)
+    return out
+
+
+def file_metadata(path):
+    """Creator / license / name stated inside the model file itself (safetensors __metadata__ or GGUF
+    general.*). Returns only what is there; never fails."""
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        low = path.lower()
+        if low.endswith((".safetensors", ".sft")):
+            m = _safetensors_meta(path)
+            keys = {"creator": ("modelspec.author", "author"), "license": ("modelspec.license", "license"),
+                    "title": ("modelspec.title", "title")}
+        elif low.endswith(".gguf"):
+            m = _gguf_meta(path)
+            keys = {"creator": ("general.author", "general.organization"), "license": ("general.license",),
+                    "title": ("general.name",), "source_url": ("general.source.url", "general.url")}
+        else:
+            return {}
+    except Exception:
+        return {}
+    out = {}
+    for k, cands in keys.items():
+        for c in cands:
+            v = str(m.get(c) or "").strip()
+            if v and len(v) < 200:
+                out[k] = v
+                break
+    return out
+
+
+def _apply_info(entry, info_entries, sha, name, warn=None):
+    """Source, license, separate license and descriptive fields from the model_info entries."""
+    warn = warn or (lambda _m: None)
+    info, matched = lookup_model_info(info_entries, sha, name, entry["file"])
+    if info is None:
+        entry["source"] = entry["license"] = entry["commercial_use"] = UNKNOWN_INFO
+        entry["license_notes"] = ""
+        entry["info_matched_by"] = None
+    else:
+        entry["source"] = str(info.get("source") or UNKNOWN_INFO)
+        entry["license"] = str(info.get("license") or UNKNOWN_INFO)
+        cu = info.get("commercial_use")
+        entry["commercial_use"] = UNKNOWN_INFO if cu in (None, "") else (
+            ("yes" if cu else "no") if isinstance(cu, bool) else str(cu))
+        entry["license_notes"] = str(info.get("notes") or "")
+        if matched is None:
+            entry["info_matched_by"] = "family " + ", ".join(info.get("_family") or [])
+        else:
+            entry["info_matched_by"] = "sha256" if sha and matched in (sha.lower(),) else (
+                "autov2" if sha and matched.lower() == hashing.autov2(sha).lower() else "file name")
+        if info.get("_family"):
+            entry["family_rows"] = info["_family"]
+        sl = info.get("separate_license")
+        if sl not in (None, ""):
+            entry["separate_license"] = "yes" if _truthy(sl) else "no"
+            if info.get("license_reference"):
+                entry["license_reference"] = str(info["license_reference"])
+        entry.update(info_extras(info))
+        bad = []
+        if sha and info.get("sha256") and str(info["sha256"]).strip().lower() != sha:
+            bad.append("SHA256")
+        if sha and info.get("autov2") and str(info["autov2"]).strip().upper() != hashing.autov2(sha):
+            bad.append("AutoV2")
+        if bad:
+            entry["hash_mismatch"] = bad
+            warn(f"{entry['file']}: {' and '.join(bad)} in the model_info file {'do' if len(bad) > 1 else 'does'} not match the file "
+                 f"– wrong entry, or the file was replaced.")
+
+
+def _apply_file_meta(entry, full):
+    """The model_info file wins (your verified statement); the file's own metadata fills what is empty.
+    The report names the source of each value."""
+    meta = file_metadata(full)
+    if meta:
+        entry["file_metadata"] = meta
+    if entry.get("creator"):
+        entry["creator_source"] = "model_info"
+    elif meta.get("creator"):
+        entry["creator"] = meta["creator"]
+        entry["creator_source"] = "file metadata"
+
+
+def _add_vision_projectors(result, compute_hashes, info_entries, show, warn):
+    """GGUF vision-language models load a vision projector (mmproj*.gguf) from the same folder without a
+    widget of its own. List it, clearly marked as derived, so its license is not overlooked."""
+    for m in list(result):
+        full = m.get("_full")
+        if not full or not full.lower().endswith(".gguf") or "mmproj" in os.path.basename(full).lower():
+            continue
+        folder = os.path.dirname(full)
+        try:
+            projs = sorted(f for f in os.listdir(folder) if f.lower().startswith("mmproj") and f.lower().endswith(".gguf"))
+        except OSError:
+            continue
+        for f in projs:
+            pfull = os.path.join(folder, f)
+            if any(x.get("_full") == pfull for x in result):
+                continue
+            entry = {"role": "vlm", "node_id": m["node_id"], "node_type": m["node_type"], "input": "(automatic)",
+                     "file": m["file"].rsplit("/", 1)[0] + "/" + f if "/" in m["file"] else f,
+                     "used_for": f"vision projector of {os.path.basename(full)} – in the same folder, usually "
+                                 f"loaded automatically (derived, not shown in the workflow)", "_full": pfull}
+            if show.full:
+                entry["path"] = pfull
+            sha = None
+            if compute_hashes:
+                try:
+                    sha, cached = hashing.sha256_file(pfull, label=f)
+                    entry.update({"sha256": sha, "autov2": hashing.autov2(sha), "hash_from_cache": cached})
+                except Exception as e:
+                    entry["sha256"] = f"not computed – {type(e).__name__}"
+            else:
+                entry["sha256"] = "not computed (compute_model_hashes is off)"
+            _apply_info(entry, info_entries, sha, f, warn)
+            _apply_file_meta(entry, pfull)
+            result.append(entry)
+
+
+def _mark_prompt_writers(graph, executed, result):
+    """A 'text encoder' that only feeds a prompt generator (LLM / VLM node) writes the prompt – it does not
+    condition the image directly. Shown as VLM with what it is used for."""
+    for m in result:
+        if m["role"] not in ("text_encoder", "vlm"):
+            continue
+        cons = consumers(graph, executed, m["node_id"])
+        if not cons:
+            continue
+        encodes = [c for c in cons if _text_encoder_texts(graph, c) is not None
+                   and not _GENERATOR_RE.search(graph.ctype(c))]
+        writers = [c for c in cons if _GENERATOR_RE.search(graph.ctype(c))]
+        if writers and not encodes:
+            m["role"] = "vlm"
+            m["used_for"] = "writes the prompt – " + ", ".join(graph.label(c) for c in writers)
 
 
 INFO_EXTRA_KEYS = ("type", "name", "version", "released", "base_model", "trigger_words", "recommended", "checked",
@@ -1164,9 +1466,12 @@ def _text_encoder_texts(graph, nid):
     texts = {}
     for k in _TEXT_KEYS:
         if k in ins:
-            ok, val, note, _chain = graph.resolve(ins[k])
+            ok, val, note, chain = graph.resolve(ins[k])
             if ok and isinstance(val, str):
                 texts[k] = val
+                if chain and chain[-1] == "value produced in this run":
+                    # text computed in this run (e.g. written by an LLM / VLM node) – remember by whom
+                    texts.setdefault("_computed_by", chain[0] if len(chain) > 1 else "a node in the graph")
             elif not ok:
                 texts[k] = f"<{note}>"
     return texts or None
@@ -1184,13 +1489,21 @@ def trace_prompts(graph, start, role, extra):
         seen.add(nid)
         if nid not in graph.nodes:
             continue
+        if re.search(r"zero.?out", graph.ctype(nid), re.I):
+            found.append({"node_id": nid, "node_type": graph.ctype(nid), "title": graph.title(nid),
+                          "texts": {"text": f"(none – conditioning zeroed out by {graph.ctype(nid)})"},
+                          "zeroed": True})
+            continue
         texts = _text_encoder_texts(graph, nid)
         ins = graph.inputs(nid)
         if "guidance" in ins and "guidance" not in extra:
             ok, val, note, _c = graph.resolve(ins["guidance"])
             extra["guidance"] = val if ok else note
         if texts is not None:
-            found.append({"node_id": nid, "node_type": graph.ctype(nid), "title": graph.title(nid), "texts": texts})
+            entry = {"node_id": nid, "node_type": graph.ctype(nid), "title": graph.title(nid), "texts": texts}
+            if "_computed_by" in texts:
+                entry["computed_by"] = texts.pop("_computed_by")
+            found.append(entry)
             continue
         if "positive" in ins and "negative" in ins:
             names = [role]
@@ -1240,6 +1553,14 @@ def latent_info(graph, nid, source_link=None):
             return {"from": graph.label(src), "note": "switch with a computed boolean – latent source not resolved"}
         nxt = next((sins[k] for k in ("samples", "latent", "latent_image", "input") if is_link(sins.get(k))), None)
         if nxt is None:
+            # size nodes (e.g. Pixaroma Sizes) often output width / height next to the latent: use the values
+            # they produced in this run
+            names = [str(n).lower() for n in (graph.output_names(graph.ctype(src)) or [])]
+            if "width" in names and "height" in names:
+                w = graph.runtime_value(src, names.index("width"))
+                h = graph.runtime_value(src, names.index("height"))
+                if isinstance(w, int) and isinstance(h, int):
+                    return {"from": graph.label(src), "width": w, "height": h, "note": "values produced in this run"}
             return {"from": graph.label(src), "note": "latent source not followed further"}
         v = nxt
     return {"note": "latent source too deep to follow"}
@@ -1397,5 +1718,6 @@ def collect(prompt, extra_pnginfo, unique_id, manual, compute_model_hashes, mode
         return A.assess(data, ctx)
 
     data["findings"], data["triage"], data["principles"] = section("Assessment", _assess, ([], None, []))
+    data["rules_date"] = A.K.RULES_DATE
     data["warnings"] = warnings
     return data

@@ -3,6 +3,102 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.3.0 – 2026-10-25
+
+### Added
+- Save Image + Metadata writes the **SHA256 of the saved image** into `.txt` / `.json` / `.pdf`. A later workflow
+  that loads the image lists the same hash under input files, which links multi-step work.
+- Production Context: tooltips for every setting; evidence fields (input rights, talent consent, union approval,
+  studio approval, legal approval) now offer `unknown / yes / no / pending / not applicable`, default `unknown`.
+  Existing workflows keep their values.
+- Studio and legal approval now count in the assessment: a declared written studio / client approval is noted at
+  the written-approval triggers and next to grade C; legal clearance softens third-party and trademark findings.
+- Trademarks / brands `yes` or `unknown` is a finding of its own; for published material without legal
+  clearance it is a written-approval point (C).
+- The triage box lists each point that needs written approval as *covered* (and by what) or *OPEN*, so the
+  reason for grade C is visible at a glance.
+- Intermediate steps (`internal production asset` with final result `yes`) get a note to audit the final step
+  as well instead of a contradiction.
+- Every report states the date of the rule set ("Rules as of 2026-10-25").
+- **Model licenses count in the grade**, weighted by whether the result is published: a license that does not
+  allow commercial use (without a separate license) in published material is a critical *license conflict*;
+  an unknown license for published material is a written-approval trigger (C). The triage box shows a one-line
+  license summary.
+- "Commercial use" summary of the models – OK / CHECK TERMS / NOT PERMITTED / UNKNOWN / NOT VERIFIED (worst
+  case wins) – also without a Production Context, as it depends on the model licenses only.
+- New grade **X – BLOCKED** (scale A, B, C, D, X – D means "not assessable"): a critical finding means the use as declared is not permitted, and an approval
+  cannot fix it. Critical always means X.
+- README: design principle (simple, stable, record before appearance), every Production Context setting with its
+  effect on the assessment, multi-step work, and what the assessment is based on (with sources and date).
+
+### Changed
+- Everything not known is shown as **`UNKNOWN / NOT VERIFIED`** instead of `UNKNOWN`. JSON values for scripts
+  are unchanged (`"unknown"`).
+- **Without a Production Context there is no triage:** the report says "Triage: not assessed – no Production
+  Context connected" and leaves out the triage, production context and guiding principles sections (JSON:
+  `triage.grade = null`, `principles = []`). Grade D now only means: context connected, but purpose and final
+  result both unknown.
+- Guiding principles are printed as principle + status on two lines.
+- A credential found in the workflow is now a *high* finding (B) instead of critical – it endangers sharing,
+  not the permission to use the image, and is fixed by removing it.
+- The report explains the two scales: severity rates a single finding, the grade says what has to happen next.
+
+### Fixed
+- Prompts written in the run by an LLM / VLM node (e.g. a prompt generator that looks at a layout image) are
+  marked with the node that wrote them, and reproducibility says so: running the workflow again writes a new
+  prompt, the recorded prompt reproduces the image ("reproducible only with the recorded values"). A
+  non-fixed seed control is treated the same way. The reproducibility notes are listed in the report.
+- A model that only feeds a prompt generator is shown as VLM with "Used for: writes the prompt – …" instead of
+  as a text encoder.
+- Input files list which nodes they feed (e.g. the prompt generator).
+- A negative conditioning made with ConditioningZeroOut is shown as "none – conditioning zeroed out" instead of
+  repeating the positive prompt.
+- Latent size from size nodes that output width / height (e.g. Pixaroma Sizes) is taken from the values they
+  produced in the run.
+- Seed control: a sampler whose seed input is linked no longer reports its own (unused) control widget; Seed
+  (rgthree) is read correctly (-1 = randomize, other values = fixed).
+- Output and "other settings" are listed one setting per line instead of one long line.
+- PDF: lines wider than the page (long URLs, paths) are wrapped instead of cut off.
+- PDF: copying / selecting text matches what is shown (explicit Courier glyph widths, every text column placed
+  at its exact position, label and value joined by a light dot leader so viewers do not split them into
+  separate columns – the label column is wide enough everywhere for that); a section heading is
+  never left alone at the bottom of a page.
+- The manual field `changes_outside_comfyui` is shown as "Planned work outside ComfyUI": work done before is
+  an input of the workflow, work done later needs its own record. It no longer counts as "not filled in".
+- Optional fields (notes, planned work) stay empty instead of UNKNOWN; "UNKNOWN / NOT VERIFIED" no longer
+  repeats "add to model_info file" on every line (the findings still say where to add it).
+- "Source image" says that there is no source image in this run and points to the input files.
+- GGUF models of LLM / VLM nodes that list only the file name (e.g. QwenVL GGUF, files in sub folders of
+  `models/LLM`) are found, hashed and matched against the model_info file. The vision projector
+  (`mmproj*.gguf`) next to such a model is listed too, marked as derived – it is loaded automatically and does
+  not appear in the workflow, but has a license of its own.
+
+### Credits
+- New **CREDITS** section: every model with creator and license, every node package with publisher, license
+  and repository, and the attribution your licenses require.
+- Node package credits are read from the installed packages themselves (`pyproject.toml`, LICENSE file,
+  git remote) – nothing to maintain.
+- Model creator: your model_info table is preferred; if it has none, the creator stated in the model file
+  (safetensors `modelspec.author`, GGUF `general.author` / `general.organization`) is used. The report says
+  where each value comes from. A license stated in the file is shown as "License in file … not verified" – it
+  does not replace your table and does not change the grade.
+
+### Readability
+- Without a Production Context the LEGEND only explains severity and evidence (no grade scale, no triage note).
+- Consent / approval fields show "n/a – none declared" when talent, union work or third-party material is
+  declared absent, instead of UNKNOWN.
+- The triage box is short: grade, reason, open points, model licenses, reproducibility. The scale, severity,
+  evidence and principle explanations moved to a **LEGEND** section at the end of the report.
+- Node numbers and node names are left out of the `.txt` / `.pdf` where they do not help a reviewer (latent
+  source, seed node, "loaded by", "used by" numbers) – they remain in the `.json`. Findings that point to a node
+  to fix (API node, credential) keep the number.
+- Inactive nodes are summarised (counts, plus bypassed loaders with their model file); the full list is in the
+  `.json`.
+- A written studio / client approval on file turns the approval findings to *low*; the grade reads
+  "C – APPROVAL ON FILE".
+- Clearer labels, placeholders and tooltips: "final cut" also covers ads, packaging and print ("final result");
+  the manual field for reference images asks for origin and rights, not the file name.
+
 ## 1.2.0 – 2026-10-24
 
 ### Added

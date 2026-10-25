@@ -101,8 +101,11 @@ def seed_node_ids(graph, samplers):
                 v = ins.get(k)
                 if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str):
                     stack.append(v[0])
-        # the node that really holds the value (end of the chain) first
-        out += [n for n in reversed(chain) if n not in out]
+        # only the node that really holds the value counts: a sampler whose seed input is linked keeps a stale
+        # control widget of its own ('randomize' …) that has no effect
+        holders = [n for n in chain if not any(isinstance(graph.inputs(n).get(k), list)
+                                               for k in ("seed", "noise_seed", "noise"))]
+        out += [n for n in reversed(holders) if n not in out]
     return out
 
 
@@ -112,6 +115,11 @@ def seed_mode(wf_nodes, node_ids):
         n = wf_nodes.get(str(nid))
         if not n:
             continue
+        wv0 = n.get("widgets_values")
+        if "rgthree" in str(n.get("type", "")).lower() and "seed" in str(n.get("type", "")).lower() \
+                and isinstance(wv0, list) and wv0 and isinstance(wv0[0], int):
+            # Seed (rgthree): -1 = random each run, -2 / -3 = increment / decrement, any other value is fixed
+            return {-1: "randomize", -2: "increment", -3: "decrement"}.get(wv0[0], "fixed"), nid
         named = n.get("widgets_values_named")
         if isinstance(named, dict) and named.get("control_after_generate") in SEED_MODES:
             return named["control_after_generate"], nid
@@ -163,6 +171,12 @@ def _input_role(ct, name, value):
     if n == "url":
         return "remote URL"
     return "image"
+
+
+def _consumers(graph, executed, nid):
+    from .collect import consumers
+
+    return consumers(graph, executed, nid)
 
 
 def input_assets(graph, executed, show, warn, compute_hashes=True):
@@ -225,6 +239,9 @@ def input_assets(graph, executed, show, warn, compute_hashes=True):
             else:
                 entry["sha256"] = "not computed – file not found"
                 warn(f"Input file of {graph.label(nid)} not found: {show.path(val)}")
+            feeds = [graph.label(c) for c in _consumers(graph, executed, nid)]
+            if feeds:
+                entry["feeds"] = feeds
             out.append(entry)
     return out
 
@@ -397,18 +414,41 @@ def reproducibility(data):
     if (data.get("environment") or {}).get("comfyui") in (None, "unknown"):
         missing.append("ComfyUI version")
     missing = list(dict.fromkeys(missing))
+    # Things that change when the saved workflow is simply run again – the recorded values still allow a
+    # reproduction (enter them as fixed values).
+    rerun = []
+    writers = []
+    for s in data.get("sampling") or []:
+        for role in ("positive", "negative"):
+            for e in (s.get("prompts") or {}).get(role) or []:
+                if e.get("computed_by") and e["computed_by"] not in writers:
+                    writers.append(e["computed_by"])
+    for w in writers:
+        w = re.sub(r" #[\w:]+$", "", w)
+        rerun.append(f"the prompt is written in each run by {w} – running the workflow "
+                     f"again writes a new prompt "
+                     f"(LLM / VLM output is not deterministic); the prompt recorded here reproduces this image")
+    sm = (data.get("seed_mode") or {}).get("mode")
+    if sm and sm != "fixed":
+        rerun.append(f"seed control is '{sm}' – running the workflow again uses a new seed; the seed recorded here "
+                     f"reproduces this image")
     if data.get("api_nodes") or any("file not found" in str(m.get("sha256", "")) for m in data.get("models") or []):
         status = "not reproducible"
     elif missing:
         status = "partially reproducible"
+    elif rerun:
+        status = "reproducible only with the recorded values"
     else:
         status = "reproducible"
-    return {"status": status, "missing": missing}
+    return {"status": status, "missing": missing, "rerun": rerun}
 
 
-def _f(findings, text, severity, route, evidence, trigger=None):
+def _f(findings, text, severity, route, evidence, trigger=None, need=None, covered=None):
+    """need: short name of what needs written approval (for the triage summary); covered: how it is
+    already covered (e.g. 'studio / client approval on file') – None while it is open."""
     findings.append({"text": text, "severity": severity, "route": route, "evidence": evidence,
-                     **({"trigger": trigger} if trigger else {})})
+                     **({"trigger": trigger} if trigger else {}), **({"need": need} if need else {}),
+                     **({"covered": covered} if covered else {})})
 
 
 def assess(data, ctx):
@@ -421,32 +461,61 @@ def assess(data, ctx):
     a = lambda k: (ctx.get(k) or "unknown")  # noqa: E731
 
     # ---- models / licenses (observed + model_info) -------------------------------
+    # The weight of a license problem depends on whether the result is published (declared in the context).
+    published = bool(ctx) and (a("in_final_cut") == "yes" or a("purpose") in ("final deliverable",
+                                                                               "marketing / publicity"))
+    internal_note = (" Commercial client work may count as commercial use even if nothing is published."
+                     if ctx and not published else "")
+    lic = {"documented": 0, "separate": 0, "restricted": 0, "unknown": 0, "conflicts": 0}
     unknown = [m for m in mods if m.get("info_matched_by") is None or m.get("license") in (None, "")
                or str(m.get("license", "")).startswith("UNKNOWN")]
+    lic["unknown"] = len(unknown)
     if mods and unknown:
-        _f(F, f"{len(unknown)} of {len(mods)} model(s) without source / license in the model_info file: "
-              + ", ".join(m["file"].split("/")[-1] for m in unknown), "medium", "legal", "external evidence required")
+        names = ", ".join(m["file"].split("/")[-1] for m in unknown)
+        if published:
+            _f(F, f"{len(unknown)} of {len(mods)} model(s) with license {K.UNKNOWN_LABEL}, but the result is "
+                  f"published: {names}. Check the licenses in writing before use.", "high", "legal",
+               "external evidence required", trigger="indicated", need="model licenses (unknown)")
+        else:
+            _f(F, f"{len(unknown)} of {len(mods)} model(s) without source / license in the model_info file: {names}",
+               "medium", "legal", "external evidence required")
     for m in mods:
+        if m in unknown:
+            continue
         cu = str(m.get("commercial_use", "")).lower()
         own = m.get("separate_license") == "yes"
         name = m.get("name") or m["file"].split("/")[-1]
         if cu in ("no", "restricted", "unclear") and own:
+            lic["separate"] += 1
             ref = f" ({m['license_reference']})" if m.get("license_reference") else " (no reference given)"
             _f(F, f"{name}: commercial use '{cu}' under the public license – covered by a separate license{ref}. "
                   f"Keep the agreement on file.", "low", "legal", "declared")
         elif cu == "no":
-            _f(F, f"{name}: license does not allow commercial use and no separate license is recorded.",
-               "high", "legal", "declared")
-        elif cu in ("restricted", "unclear"):
-            _f(F, f"{name}: commercial use '{cu}' – check the license terms for this use.", "medium", "legal",
-               "declared")
-        elif m not in unknown and cu != "yes":
-            if not cu or cu.startswith("unknown"):
-                _f(F, f"{name}: license recorded, but commercial use is UNKNOWN – add yes / no / restricted / "
-                      f"unclear to the model_info file.", "medium", "legal", "external evidence required")
+            lic["conflicts"] += 1
+            if published:
+                _f(F, f"{name}: LICENSE CONFLICT – the license does not allow commercial use, no separate license "
+                      f"is recorded, and the result is published. A studio or client approval cannot fix this – "
+                      f"only a license from the rights holder, or a different model.", "critical", "legal",
+                   "declared")
             else:
-                _f(F, f"{name}: commercial use '{m.get('commercial_use')}' is not one of yes / no / restricted / "
-                      f"unclear – treated as UNKNOWN.", "medium", "legal", "declared")
+                _f(F, f"{name}: license does not allow commercial use and no separate license is recorded."
+                      + internal_note, "high", "legal", "declared")
+        elif cu in ("restricted", "unclear"):
+            lic["restricted"] += 1
+            _f(F, f"{name}: commercial use '{cu}' – check the license terms (e.g. revenue limits, territories) for "
+                  f"this use." + internal_note, "high" if published else "medium", "legal", "declared")
+        elif cu == "yes":
+            lic["documented"] += 1
+        else:
+            lic["unknown"] += 1
+            what = (f"license recorded, but commercial use is {K.UNKNOWN_LABEL} – add yes / no / restricted / "
+                    f"unclear to the model_info file." if (not cu or cu.startswith("unknown")) else
+                    f"commercial use '{m.get('commercial_use')}' is not one of yes / no / restricted / unclear – "
+                    f"treated as {K.UNKNOWN_LABEL}.")
+            _f(F, f"{name}: {what}", "high" if published else "medium", "legal", "external evidence required",
+               trigger="indicated" if published else None, need=f"commercial use of {name}" if published else None)
+    for m in mods:
+        name = m.get("name") or m["file"].split("/")[-1]
         if m.get("hash_mismatch"):
             _f(F, f"{m['file'].split('/')[-1]}: {' and '.join(m['hash_mismatch'])} in the model_info file "
                   f"{'do' if len(m['hash_mismatch']) > 1 else 'does'} not match this file.", "medium", "docs", "observed")
@@ -471,7 +540,7 @@ def assess(data, ctx):
               "(storage, reuse, training).", "high", "security", "observed")
     for sec in data.get("secrets") or []:
         _f(F, f"{sec['node_type']} #{sec['node_id']}: credential-like value in '{sec['input']}' – redacted here, but "
-              f"still stored in the workflow / PNG metadata. Remove it before sharing.", "critical", "security",
+              f"still stored in the workflow / PNG metadata. Remove it before sharing.", "high", "security",
            "observed")
     for cap in caps:
         talent = a("talent_likeness_or_voice")
@@ -490,30 +559,46 @@ def assess(data, ctx):
             break
 
     # ---- production context (declared) --------------------------------------------
-    if not ctx:
-        _f(F, "No production context connected – purpose, rights and consent are undeclared. Connect "
-              "'Pertineo Production Context' for a triage.", "medium", "production", "external evidence required")
-    else:
+    # Without a Production Context there is no triage at all (the report says 'not assessed');
+    # the findings above (licenses, API, secrets, capabilities) apply anyway.
+    if ctx:
         p = a("purpose")
+        sa, la = a("studio_approval"), a("legal_approval")
+
+        def approval(base):
+            """(text, severity) for a written-approval trigger, depending on the declared studio approval."""
+            if sa == "yes":
+                return base + " – written studio / client approval on file (declared). Keep it with the project.", "low"
+            if sa == "pending":
+                return base + " – studio / client approval pending.", "high"
+            return base + " – written approval is usually required.", "high"
+
         if p == "final deliverable" or a("in_final_cut") == "yes":
-            _f(F, "Generated material is intended for final delivery / the final cut – written approval is usually "
-                  "required.", "high", "production", "declared", trigger="indicated")
-        # story-critical only matters for what ends up on screen – a moodboard for a key scene is not a risk
+            t, sv = approval("Generated material is intended for the final / published result")
+            _f(F, t, sv, "production", "declared", trigger="indicated", need="final / published result",
+               covered="studio / client approval" if sa == "yes" else None)
+        # story-critical only matters for what ends up in the result – a moodboard for a key scene is not a risk
         if a("story_critical") == "yes" and a("in_final_cut") == "yes":
-            _f(F, "Generated elements are story-critical or prominently visible in the final cut – written "
-                  "approval is usually required.", "high", "production", "declared", trigger="indicated")
+            t, sv = approval("Generated elements are story-critical or prominently visible in the final result")
+            _f(F, t, sv, "production", "declared", trigger="indicated", need="story-critical elements",
+               covered="studio / client approval" if sa == "yes" else None)
         elif a("story_critical") == "yes" and a("in_final_cut") == "unknown":
-            _f(F, "Generated elements are story-critical – unknown whether they appear in the final cut. If they "
-                  "do, written approval is usually required.", "medium", "production", "external evidence required",
-               trigger="potential")
+            _f(F, "Generated elements are story-critical – unknown whether they appear in the final result. If "
+                  "they do, written approval is usually required.", "medium", "production",
+               "external evidence required", trigger="potential")
         if p == "marketing / publicity":
-            _f(F, "Material for marketing / publicity – check rights and approvals for public use.", "high",
-               "production", "declared")
+            _f(F, "Material for marketing / publicity – check rights and approvals for public use.",
+               "medium" if (sa == "yes" and la == "yes") else "high", "production", "declared")
         if p == "internal production asset":
-            _f(F, "Internal production asset – confirm it will not reach the final cut.", "medium", "production",
-               "declared")
+            fc = a("in_final_cut")
+            if fc == "yes":
+                _f(F, "Intermediate step – its output feeds the final result. Audit the final step as well; the "
+                      "output SHA256 in this report links the two.", "low", "production", "declared")
+            elif fc == "unknown":
+                _f(F, "Internal production asset – unknown whether its output reaches the final result.", "medium",
+                   "production", "external evidence required")
         if p == "unknown":
-            _f(F, "Purpose not declared.", "medium", "production", "external evidence required")
+            _f(F, f"Purpose {K.UNKNOWN_LABEL}.", "medium", "production", "external evidence required")
         triggers = [
             ("unreleased_material", "Unreleased / proprietary production material entered into GenAI", "security"),
             ("personal_data", "Personal data entered into GenAI", "security"),
@@ -538,25 +623,46 @@ def assess(data, ctx):
                 ok_consent = key in ("talent_likeness_or_voice", "union_covered_work") and \
                     a("talent_consent" if key == "talent_likeness_or_voice" else "union_approval") == "yes"
                 _f(F, f"{label}{' – approval / consent declared, keep on file' if ok_consent else ''}.",
-                   "medium" if ok_consent else "high", route, "declared", trigger="indicated")
+                   "medium" if ok_consent else "high", route, "declared", trigger="indicated",
+                   need={"unreleased_material": "unreleased material sent to a cloud service",
+                         "personal_data": "personal data sent to a cloud service",
+                         "talent_likeness_or_voice": "talent likeness / voice",
+                         "union_covered_work": "union / guild-covered work"}[key],
+                   covered=("consent on file" if ok_consent else None))
             elif v == "unknown":
-                _f(F, f"Not declared: {label.lower()}?", "medium", route, "external evidence required",
+                _f(F, f"{K.UNKNOWN_LABEL}: {label.lower()}?", "medium", route, "external evidence required",
                    trigger="potential")
         tp = a("third_party_copyright")
         if tp == "yes":
-            docs = a("input_rights_documented") == "yes"
+            docs = a("input_rights_documented") == "yes" or la == "yes"
             _f(F, "Third-party copyrighted material in the inputs" + (" – rights documentation declared." if docs
                else " without documented rights."), "medium" if docs else "high", "legal", "declared",
-               trigger=None if docs else "indicated")
+               trigger=None if docs else "indicated", need=None if docs else "third-party material")
         elif tp == "unknown":
-            _f(F, "Not declared: third-party copyrighted material in the inputs?", "medium", "legal",
+            _f(F, f"{K.UNKNOWN_LABEL}: third-party copyrighted material in the inputs?", "medium", "legal",
                "external evidence required")
-        if a("trademarks_brands") == "yes":
-            _f(F, "Trademarks / branded assets in the inputs – check clearance.", "medium", "legal", "declared")
+        tm = a("trademarks_brands")
+        published = a("in_final_cut") == "yes" or p in ("final deliverable", "marketing / publicity")
+        if tm in ("yes", "unknown"):
+            what = ("Trademarks / brands in the inputs or output" if tm == "yes" else
+                    f"Trademarks / brands {K.UNKNOWN_LABEL} – names or designs may be close to existing brands")
+            if la == "yes":
+                _f(F, f"{what} – legal clearance declared, keep it on file.", "low", "legal", "declared")
+            elif la == "pending":
+                _f(F, f"{what} – legal review pending; clear it before publication.",
+                   "high" if published else "medium", "legal", "declared",
+                   trigger="indicated" if published else None,
+                   need="trademark / brand clearance (legal review pending)" if published else None)
+            else:
+                _f(F, f"{what} – legal clearance not on file{' before publication' if published else ''}.",
+                   "high" if published else "medium", "legal",
+                   "declared" if tm == "yes" else "external evidence required",
+                   trigger="indicated" if published else None,
+                   need="trademark / brand clearance" if published else None)
         et = a("external_tools_train")
         if et == "yes":
             _f(F, "External tools may store, reuse or train on the data.", "high", "security", "declared",
-               trigger="indicated")
+               trigger="indicated", need="external tools that store / train on the data")
         elif et == "unknown" and api:
             _f(F, "Unknown whether the external services store, reuse or train on the data.", "high", "security",
                "external evidence required", trigger="potential")
@@ -567,8 +673,7 @@ def assess(data, ctx):
             if not (ctx.get(key) or "").strip():
                 _f(F, f"No {label} recorded.", "low", "vfx", "external evidence required")
     empty = [lbl for key, lbl in (("workflow_purpose", "Purpose"), ("reference_image_sources", "Reference images"),
-                                  ("external_software", "External software"),
-                                  ("changes_outside_comfyui", "Changes outside ComfyUI"))
+                                  ("external_software", "External software"))
              if not str((data.get("manual") or {}).get(key) or "").strip()]
     if empty:
         _f(F, "Not filled in: " + ", ".join(empty) + ".", "low", "docs", "external evidence required")
@@ -578,13 +683,35 @@ def assess(data, ctx):
     for i, f in enumerate(F, 1):
         f["id"] = f"F{i:02d}"
 
+    # ---- commercial use of the models (independent of the context) ----------------
+    if not mods:
+        commercial = {"status": "no model files", "models": 0}
+    elif lic["conflicts"]:
+        commercial = {"status": "NOT PERMITTED", "models": lic["conflicts"]}
+    elif lic["unknown"]:
+        commercial = {"status": K.UNKNOWN_LABEL, "models": lic["unknown"]}
+    elif lic["restricted"]:
+        commercial = {"status": "CHECK TERMS", "models": lic["restricted"]}
+    else:
+        commercial = {"status": "OK", "models": 0}
+    lic["commercial_use"] = commercial
+
     # ---- triage ------------------------------------------------------------------
     sev = {s: sum(1 for f in F if f["severity"] == s) for s in K.SEVERITIES}
     indicated = [f for f in F if f.get("trigger") == "indicated"]
-    if not ctx or (a("purpose") == "unknown" and a("in_final_cut") == "unknown"):
-        grade, why = "D", "production context missing or purpose undeclared"
-    elif indicated or sev["critical"]:
-        grade, why = "C", (f"{len(indicated)} written-approval trigger(s)" if indicated else "critical finding")
+    if not ctx:
+        return F, {"grade": None, "label": "NOT ASSESSED", "reason": K.NOT_ASSESSED, "counts": sev,
+                   "licenses": lic, "note": K.TRIAGE_NOTE}, []
+    if a("purpose") == "unknown" and a("in_final_cut") == "unknown":
+        grade, why = "D", "purpose and final result undeclared"
+    elif sev["critical"]:
+        grade, why = "X", f"{sev['critical']} critical finding(s) – the use as declared is not permitted"
+    elif indicated:
+        n_cov = sum(1 for f in indicated if f.get("covered"))
+        n_open = len(indicated) - n_cov
+        grade = "C"
+        why = (f"written approval needed for {len(indicated)} point{'s' if len(indicated) != 1 else ''}"
+               + (" – all covered (declared)" if not n_open else f" – {n_open} open"))
     elif sev["high"] or sev["medium"] or a("purpose") not in K.LOW_RISK_PURPOSES or a("in_final_cut") != "no":
         grade, why = "B", "open points need review before use"
     else:
@@ -593,7 +720,15 @@ def assess(data, ctx):
     for f in F:
         if f["severity"] in ("critical", "high", "medium"):
             routes[f["route"]] = routes.get(f["route"], 0) + 1
-    triage = {"grade": grade, "label": K.TRIAGE[grade], "reason": why, "counts": sev,
+    needs = []
+    for f in indicated:
+        nm = f.get("need") or f["text"].split(" – ")[0][:60]
+        entry = {"need": nm, "covered": f.get("covered")}
+        if entry not in needs:
+            needs.append(entry)
+    triage = {"grade": grade, "label": K.TRIAGE[grade], "reason": why, "counts": sev, "licenses": lic,
+              "covered": bool(indicated) and grade == "C" and all(f.get("covered") for f in indicated),
+              "needs": needs if grade in ("C", "X") else [],
               "routes": [{"route": K.ROUTES[r], "open_points": n} for r, n in
                          sorted(routes.items(), key=lambda x: -x[1])],
               "note": K.TRIAGE_NOTE}
@@ -613,13 +748,13 @@ def principles(data, ctx):
         out.append({"id": pid, "principle": label, "status": status, "basis": why})
 
     if not ctx:
-        for pid, _l in K.PRINCIPLES:
-            add(pid, "unknown", "no production context connected")
         return out
     tp, tm = a("third_party_copyright"), a("trademarks_brands")
-    if tp == "no" and tm == "no":
-        add("P1", "yes", "declared: no third-party copyrighted material or brands in the inputs (output not inspected)")
-    elif tp == "yes" and a("input_rights_documented") != "yes":
+    cleared = a("legal_approval") == "yes"
+    if tp == "no" and (tm == "no" or (tm == "yes" and cleared)):
+        add("P1", "yes", "declared: no third-party copyrighted material in the inputs"
+            + (", brands legally cleared" if tm == "yes" else " and no brands") + " (output not inspected)")
+    elif tp == "yes" and a("input_rights_documented") != "yes" and not cleared:
         add("P1", "no", "declared third-party material without documented rights")
     else:
         add("P1", "unknown", "inputs not fully declared; the output itself needs visual review")
@@ -642,11 +777,11 @@ def principles(data, ctx):
         add("P3", "unknown", f"environment: {env}")
     p, fc = a("purpose"), a("in_final_cut")
     if p in K.LOW_RISK_PURPOSES and fc == "no":
-        add("P4", "yes", f"declared: {p}, not in the final cut")
+        add("P4", "yes", f"declared: {p}, not in the final result")
     elif p == "final deliverable" or fc == "yes":
-        add("P4", "no", "declared as final deliverable / in the final cut")
+        add("P4", "no", "declared as final deliverable / in the final result")
     else:
-        add("P4", "unknown", f"purpose '{p}', final cut '{fc}'")
+        add("P4", "unknown", f"purpose '{p}', final result '{fc}'")
     tl, un = a("talent_likeness_or_voice"), a("union_covered_work")
     if tl == "no" and un == "no":
         add("P5", "yes", "declared: no talent likeness / voice and no union-covered work"
