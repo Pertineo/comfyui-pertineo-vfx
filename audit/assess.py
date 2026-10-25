@@ -180,6 +180,8 @@ def _consumers(graph, executed, nid):
 
 
 def input_assets(graph, executed, show, warn, compute_hashes=True):
+    """Every file / folder / URL a node of the prompt loads – also loaders that are not connected to an output
+    (marked 'not used'), so nothing that was loaded into the workflow is missing from the report."""
     out = []
     try:
         import folder_paths
@@ -187,7 +189,9 @@ def input_assets(graph, executed, show, warn, compute_hashes=True):
         input_dir = os.path.realpath(folder_paths.get_input_directory())
     except Exception:
         input_dir = None
-    for nid in executed:
+    exe = set(executed)
+    others = [n for n in graph.nodes if n not in exe]
+    for nid in list(executed) + others:
         ct = graph.ctype(nid)
         if ct.startswith(("PertineoCollectMetadata", "PertineoSaveImageMetadata", "PertineoModelInfo")):
             continue
@@ -226,7 +230,8 @@ def input_assets(graph, executed, show, warn, compute_hashes=True):
                     entry["sha256"] = sha
                 except Exception as e:
                     entry["sha256"] = f"not computed – {type(e).__name__}"
-                    warn(f"Input file of {graph.label(nid)} could not be hashed ({type(e).__name__})")
+                    if nid in exe:
+                        warn(f"Input file of {graph.label(nid)} could not be hashed ({type(e).__name__})")
             elif kind == "file":
                 entry["sha256"] = "not computed (compute_model_hashes is off)"
             elif kind == "folder":
@@ -238,12 +243,361 @@ def input_assets(graph, executed, show, warn, compute_hashes=True):
                 entry["sha256"] = "not computed (folder)"
             else:
                 entry["sha256"] = "not computed – file not found"
-                warn(f"Input file of {graph.label(nid)} not found: {show.path(val)}")
+                if nid in exe:
+                    warn(f"Input file of {graph.label(nid)} not found: {show.path(val)}")
             feeds = [graph.label(c) for c in _consumers(graph, executed, nid)]
             if feeds:
                 entry["feeds"] = feeds
+            if nid in exe:
+                entry["used_as"] = input_use(graph, executed, nid)
+            else:
+                entry["used_as"] = [{"use": "not used", "via": []}]
             out.append(entry)
+    for i, e in enumerate(out, 1):
+        e["index"] = i
     return out
+
+
+def _unused(asset):
+    return [u.get("use") for u in asset.get("used_as") or []] == ["not used"]
+
+
+# --------------------------------------------------------------------------
+# How an input is used (follows the graph downstream from the loader)
+# --------------------------------------------------------------------------
+USES = ("source", "guidance", "reference", "prompt reference", "preview only", "use not determined", "not used")
+USE_LEGEND = {
+    "source": "its pixels go into the result (img2img, inpaint, edit, video input, comp, matte plate)",
+    "guidance": "steers structure or area (ControlNet image, pose, depth, mask) – its pixels are not in the result",
+    "reference": "steers style or likeness (IP-Adapter, CLIP vision, style model, face ID)",
+    "prompt reference": "read by a prompt writer (LLM / VLM) – it shapes the prompt, it is not in the image",
+    "preview only": "only shown in a preview node – not used for the result",
+    "use not determined": "connected, but the audit cannot tell how it is used",
+    "not used": "loaded in the workflow, but not connected to an output – not part of the run",
+}
+_GUIDANCE_RE = re.compile(r"controlnet|control_net|t2i.?adapter|preprocess|canny|depth|openpose|dwpose|pose|lineart|"
+                          r"softedge|\bhed\b|scribble|normal.?map|segment|\bsam\b|tile.?pre|aio", re.I)
+_REFERENCE_RE = re.compile(r"ipadapter|ip_adapter|clip.?vision|style.?model|redux|instantid|pulid|faceid|photomaker|"
+                           r"reactor|faceswap|face.?swap|infiniteyou|uno\b", re.I)
+_SOURCE_RE = re.compile(r"vae.?encode|inpaint|img2vid|i2v|image.?to.?video|imagetovideo|encode.*video|"
+                        r"reference.?latent|kontext|edit|vitmatte|trimap|composite|matte", re.I)
+_PREVIEW_RE = re.compile(r"preview|show|display|compare", re.I)
+_MASK_INPUT_RE = re.compile(r"mask", re.I)
+
+
+def _edges_from(graph, executed, nid):
+    """(consumer, input name, output index) for every executed node that takes an output of `nid`."""
+    out = []
+    for c in executed:
+        for name, v in graph.inputs(c).items():
+            if isinstance(v, list) and len(v) == 2 and v[0] == nid:
+                out.append((c, name, v[1]))
+    return out
+
+
+def _makes_conditioning(graph, nid):
+    ct = graph.ctype(nid)
+    c = graph.cls(ct)
+    try:
+        types = [str(t).upper() for t in (getattr(c, "RETURN_TYPES", None) or ())] if c is not None else None
+    except Exception:
+        types = None
+    if types is None:
+        return bool(re.search(r"encode|conditioning", ct, re.I))
+    return "CONDITIONING" in types
+
+
+def _is_generator(graph, nid):
+    """A prompt writer (LLM / VLM / caption node): writes text, does not encode it into conditioning.
+    It may take a text encoder as its language model (clip input) – that does not make it an encoder."""
+    from .collect import _GENERATOR_RE, is_sampler
+
+    return bool(_GENERATOR_RE.search(graph.ctype(nid))) and not is_sampler(graph, nid) \
+        and not _makes_conditioning(graph, nid)
+
+
+def _scalar_output(graph, nid, idx):
+    """True for outputs that carry a number or text (frame count, folder name …), not the image itself."""
+    c = graph.cls(graph.ctype(nid))
+    try:
+        types = getattr(c, "RETURN_TYPES", None) if c is not None else None
+        t = str(types[idx]).upper() if types and idx < len(types) else ""
+    except Exception:
+        t = ""
+    return t in ("INT", "FLOAT", "STRING", "BOOLEAN")
+
+
+def input_use(graph, executed, nid):
+    """[{use, via: [node labels]}] – how the output of a loader reaches the result. Pass-through nodes (resize,
+    crop, colour …) are followed; the first node that consumes the image in a known way decides."""
+    from .collect import is_sampler
+
+    found = {}
+    seen = set()
+    stack = [(c, name, idx, 0, graph.output_name(nid, idx)) for c, name, idx in _edges_from(graph, executed, nid)
+             if not _scalar_output(graph, nid, idx)]
+    while stack:
+        c, name, idx, depth, out_name = stack.pop()
+        if (c, name) in seen or depth > 20:
+            continue
+        seen.add((c, name))
+        ct = graph.ctype(c)
+        ins = graph.inputs(c)
+        use = None
+        if ct.startswith("PertineoCollectMetadata"):
+            continue  # source_image / output_image of the audit node only measure the resolution
+        if str(out_name).lower() == "mask" or _MASK_INPUT_RE.search(name):
+            use = "guidance"
+        elif _is_generator(graph, c):
+            use = "prompt reference"
+        elif _REFERENCE_RE.search(ct):
+            use = "reference"
+        elif _GUIDANCE_RE.search(ct) or name.lower() in ("control_image", "hint", "control_hint"):
+            use = "guidance"
+        elif _SOURCE_RE.search(ct) or name.lower() == "pixels":
+            use = "source"
+        elif "clip" in ins and any(k in ins for k in ("text", "prompt")):
+            use = "source"  # text encoder of an edit model that reads the image (e.g. Qwen Image Edit)
+        elif graph.is_output_node(ct):
+            use = "preview only" if _PREVIEW_RE.search(ct) else "source"
+        elif is_sampler(graph, c):
+            use = "source"
+        if use:
+            found.setdefault(use, [])
+            if graph.label(c) not in found[use]:
+                found[use].append(graph.label(c))
+            continue
+        nxt = _edges_from(graph, executed, c)
+        if not nxt:
+            found.setdefault("use not determined", []).append(graph.label(c))
+        for c2, n2, i2 in nxt:
+            if not _scalar_output(graph, c, i2):
+                stack.append((c2, n2, i2, depth + 1, graph.output_name(c, i2)))
+    if len(found) > 1:
+        found.pop("use not determined", None)
+        if any(u in found for u in ("source", "guidance", "reference", "prompt reference")):
+            found.pop("preview only", None)
+    if not found:
+        found = {"use not determined": []}
+    return [{"use": u, "via": found[u]} for u in USES if u in found]
+
+
+# --------------------------------------------------------------------------
+# What a prompt writer (LLM / VLM node) was given
+# --------------------------------------------------------------------------
+_IMAGE_IN_RE = re.compile(r"^(image|images|img|pixels|input_image|frames|video|picture|photo)\d*$", re.I)
+_SKIP_WRITER_RE = re.compile(r"model|quant|device|attention|dtype|precision|keep|unload|offload|memory|cache|gpu|"
+                             r"cpu|vram|clip|vae|upload|^lora", re.I)
+_WRITER_SETTING_KEYS = re.compile(r"seed|temperature|top_p|top_k|min_p|max_tokens|max_new_tokens|max_length|"
+                                  r"repetition_penalty|num_beams|do_sample|length", re.I)
+WRITER_TEXT_WORDS = 512  # .txt / .pdf; the .json keeps every text in full
+
+
+def _upstream_files(graph, link, assets_by_node, depth=0, seen=None):
+    """Input files that reach a node through `link` (through resize, crop … nodes)."""
+    seen = seen if seen is not None else set()
+    if not (isinstance(link, list) and len(link) == 2) or depth > 20 or link[0] in seen:
+        return [], []
+    src = link[0]
+    seen.add(src)
+    if src in assets_by_node:
+        return list(assets_by_node[src]), []
+    files, made = [], []
+    if _is_generator(graph, src):
+        return [], [graph.label(src)]
+    ups = [v for v in graph.inputs(src).values() if isinstance(v, list) and len(v) == 2]
+    if not ups:
+        made.append(graph.label(src))
+    for v in ups:
+        f, m = _upstream_files(graph, v, assets_by_node, depth + 1, seen)
+        files += [x for x in f if x not in files]
+        made += [x for x in m if x not in made]
+    return files, made
+
+
+def prompt_writers(graph, executed, sampling, assets, models, show):
+    """Every LLM / VLM / prompt node that writes text used by a text encoder, with what it was given:
+    images (traced back to the input files), instructions and presets, linked texts (resolved to what they
+    held in this run), settings, and upstream writers. Nothing is guessed – unresolvable values are marked."""
+    from .collect import is_link
+
+    assets_by_node = {}
+    for a in assets:
+        assets_by_node.setdefault(a["node_id"], []).append(a)
+    exe = set(executed)
+    # writers that feed the prompts of a sampler (found by walking upstream from the text encoders)
+    roots = []
+    for s in sampling or []:
+        for role in ("positive", "negative"):
+            for e in (s.get("prompts") or {}).get(role) or []:
+                if e.get("zeroed"):
+                    continue  # zeroed-out conditioning: no prompt, even if the encoder behind it has one
+                for k, raw in graph.inputs(e["node_id"]).items():
+                    if not is_link(raw):
+                        continue
+                    for w in _writers_upstream(graph, raw):
+                        roots.append((w, f"{role} prompt of {graph.label(s['node_id'])}"))
+    out, order = {}, []
+
+    def visit(wid, feeds, depth):
+        if wid not in exe or depth > 6:
+            return
+        if wid in out:
+            if feeds not in out[wid]["feeds"]:
+                out[wid]["feeds"].append(feeds)
+            return
+        entry = {"node_id": wid, "node_type": graph.ctype(wid), "title": graph.title(wid), "feeds": [feeds],
+                 "images": [], "texts": [], "settings": {}, "models": []}
+        out[wid] = entry
+        order.append(wid)
+        for m in models or []:
+            users = re.split(r",\s*", str(m.get("used_for") or "").split(" – ", 1)[-1])
+            if m.get("node_id") == wid or graph.label(wid) in users:
+                entry["models"].append(m["file"])
+        ins = graph.inputs(wid)
+        for name, raw in ins.items():
+            if is_link(raw):
+                src = raw[0]
+                if src not in graph.nodes:
+                    continue
+                if _IMAGE_IN_RE.match(name) or str(graph.output_name(src, raw[1])).upper() in ("IMAGE", "MASK"):
+                    files, made = _upstream_files(graph, raw, assets_by_node)
+                    entry["images"].append({"input": name, "files": [f["index"] for f in files],
+                                            "file_names": [f["file"] for f in files],
+                                            "produced_by": made})
+                    for w in made:
+                        m = re.search(r"#([\w:]+)$", w)
+                        if m and _is_generator(graph, m.group(1)):
+                            visit(m.group(1), f"image of {graph.label(wid)}", depth + 1)
+                    continue
+                if _SKIP_WRITER_RE.search(name):
+                    continue
+                if _is_generator(graph, src):
+                    ok, val, note, chain = graph.resolve(raw)
+                    entry["texts"].append({"input": name, "from": graph.label(src), "written_by": graph.label(src),
+                                           "text": val if ok and isinstance(val, str) else None,
+                                           "note": None if ok else note})
+                    visit(src, f"{name} of {graph.label(wid)}", depth + 1)
+                    continue
+                ok, val, note, chain = graph.resolve(raw)
+                if ok and isinstance(val, str):
+                    entry["texts"].append({"input": name, "from": " → ".join(c for c in chain
+                                                                              if c != "value produced in this run"),
+                                           "text": _redact(name, val, show)})
+                    # a text joined from several pieces: list the writers behind it as well
+                    for w in _writers_upstream(graph, raw):
+                        visit(w, f"{name} of {graph.label(wid)}", depth + 1)
+                elif ok and isinstance(val, (int, float, bool)):
+                    entry["settings"][name] = val
+                elif not ok:
+                    entry["texts"].append({"input": name, "from": " → ".join(chain), "text": None, "note": note})
+                continue
+            if isinstance(raw, dict):
+                continue
+            if isinstance(raw, str):
+                if _SKIP_WRITER_RE.search(name) or raw.lower().endswith((".gguf", ".safetensors", ".bin", ".pt",
+                                                                         ".pth", ".ckpt")):
+                    continue
+                if raw.strip():
+                    entry["texts"].append({"input": name, "from": None, "text": _redact(name, raw, show)})
+            elif isinstance(raw, (int, float, bool)) and _WRITER_SETTING_KEYS.search(name):
+                entry["settings"][name] = raw
+        rv = graph.runtime_value(wid, 0)
+        if isinstance(rv, str):
+            entry["output"] = rv
+
+    for w, feeds in roots:
+        visit(w, feeds, 0)
+    return [out[w] for w in order]
+
+
+def _redact(name, val, show):
+    if _SECRET_NAME_RE.search(name) or _SECRET_VALUE_RE.match(val.strip()):
+        return "REDACTED"
+    return show.text(val) if (os.sep in val and not show.full) else val
+
+
+def _writers_upstream(graph, link, depth=0, seen=None):
+    """Nearest prompt-writer nodes upstream of a text link."""
+    seen = seen if seen is not None else set()
+    if not (isinstance(link, list) and len(link) == 2) or depth > 15 or link[0] in seen or link[0] not in graph.nodes:
+        return []
+    src = link[0]
+    seen.add(src)
+    if _is_generator(graph, src):
+        return [src]
+    out = []
+    for name, v in graph.inputs(src).items():
+        if isinstance(v, list) and len(v) == 2 and not _IMAGE_IN_RE.match(name) and not _SKIP_WRITER_RE.search(name):
+            out += [w for w in _writers_upstream(graph, v, depth + 1, seen) if w not in out]
+    return out
+
+
+# --------------------------------------------------------------------------
+# Workflow outline from the groups of the workflow
+# --------------------------------------------------------------------------
+def _xy(v):
+    if isinstance(v, dict):
+        v = [v.get("0", v.get(0, 0)), v.get("1", v.get(1, 0))]
+    try:
+        return float(v[0]), float(v[1])
+    except Exception:
+        return None
+
+
+def workflow_outline(extra_pnginfo, graph, executed):
+    """The groups of the workflow (as the artist laid them out) with the nodes in each, in reading order
+    (left to right, top to bottom). Nodes that are not part of the run are counted, not listed."""
+    wf = (extra_pnginfo or {}).get("workflow") if isinstance(extra_pnginfo, dict) else None
+    if not isinstance(wf, dict):
+        return None
+    groups = [g for g in (wf.get("groups") or []) if isinstance(g, dict) and isinstance(g.get("bounding"), list)
+              and len(g["bounding"]) == 4]
+    if not groups:
+        return None
+    exe_top = {}
+    for n in executed:
+        exe_top.setdefault(str(n).split(":")[0], []).append(n)
+    prompt_top = {str(n).split(":")[0] for n in graph.nodes}
+    members = {i: [] for i in range(len(groups))}
+    ungrouped = []
+    for n in wf.get("nodes") or []:
+        if not isinstance(n, dict) or "id" not in n:
+            continue
+        nid = str(n["id"])
+        state = _mode_name(n.get("mode"))
+        if not state:
+            if nid in exe_top:
+                state = "run"
+            elif nid in prompt_top:
+                state = "not connected"
+            else:
+                continue  # notes, reroutes, primitives, Set/Get – not nodes that run
+        p = _xy(n.get("pos"))
+        if p is None:
+            continue
+        sz = _xy(n.get("size")) or (0.0, 0.0)
+        cx, cy = p[0] + sz[0] / 2, p[1] + min(sz[1], 40) / 2
+        best = None
+        for i, g in enumerate(groups):
+            x, y, w, h = [float(t) for t in g["bounding"]]
+            if x <= cx <= x + w and y <= cy <= y + h and (best is None or w * h < best[1]):
+                best = (i, w * h)
+        item = {"node_id": nid, "node_type": n.get("type") or graph.ctype(nid), "title": n.get("title"),
+                "state": state}
+        (members[best[0]] if best else ungrouped).append(item)
+    order = sorted(range(len(groups)), key=lambda i: (round(float(groups[i]["bounding"][0]) / 50),
+                                                      float(groups[i]["bounding"][1])))
+    out = []
+    for i in order:
+        mem = members[i]
+        if not mem:
+            continue
+        out.append({"title": str(groups[i].get("title") or "").strip() or "(untitled group)",
+                    "nodes": [m for m in mem if m["state"] == "run"],
+                    "inactive": [m for m in mem if m["state"] != "run"]})
+    return {"groups": out, "ungrouped": [m for m in ungrouped if m["state"] == "run"],
+            "ungrouped_inactive": len([m for m in ungrouped if m["state"] != "run"])}
 
 
 # --------------------------------------------------------------------------
@@ -382,7 +736,7 @@ def external_services(api_nodes, assets, settings_full):
     out = [{"service": f"{a['node_type']} #{a['node_id']}", "kind": "API node",
             "note": "prompts / images may be sent to the provider"} for a in api_nodes]
     for a in assets:
-        if a.get("role") == "remote URL":
+        if a.get("role") == "remote URL" and not _unused(a):
             out.append({"service": a["file"], "kind": "remote URL", "note": f"{a['node_type']} #{a['node_id']}"})
     return out
 
@@ -402,6 +756,8 @@ def reproducibility(data):
         if g.get("version") in (None, "", "unknown"):
             missing.append(f"version of node package {g['package']}")
     for a in data.get("input_assets") or []:
+        if _unused(a):
+            continue  # not part of the run
         if not re.fullmatch(r"[0-9a-f]{64}", str(a.get("sha256", ""))):
             missing.append(f"hash of input {a['file']}")
     for s in data.get("sampling") or []:
@@ -553,7 +909,7 @@ def assess(data, ctx):
         _f(F, f"Capability present: {cap['capability']} ({', '.join(cap['evidence'][:4])}) – {txt}.", sev, "talent",
            "derived", trigger=None if sev == "low" else "potential")
     for asset in data.get("input_assets") or []:
-        if asset.get("location") == "network / mounted drive":
+        if asset.get("location") == "network / mounted drive" and not _unused(asset):
             _f(F, f"Input from a network / mounted drive: {asset['file']} – confirm the material may be used here.",
                "low", "security", "observed")
             break

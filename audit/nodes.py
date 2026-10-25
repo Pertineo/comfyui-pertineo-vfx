@@ -111,6 +111,17 @@ class PertineoCollectMetadata:
                 "production_context": ("PERTINEO_CONTEXT", {
                     "tooltip": "Optional: connect 'Pertineo Production Context' for the declared purpose, rights and "
                                "consent. Without it the triage is D (indeterminate)."}),
+                "step": ("STRING", {"default": "", "placeholder": "STEP: e.g. 02 – character insert",
+                    "tooltip": "Optional: which step of the pipeline this workflow is, e.g. '01 – layout', "
+                               "'02 – character insert', '03 – upscale'. Keep it the SAME for every iteration of "
+                               "this step (re-runs, variants, takes) – iterations are told apart by file name, time "
+                               "and SHA256 of the saved image, and the input / output SHA256 links the steps. "
+                               "Remarks on a single iteration ('v03 – warmer light') go into notes."}),
+                "step_description": ("STRING", {"default": "", "multiline": True,
+                    "placeholder": "STEP DESCRIPTION: what this step does, e.g. layout from Krita → VLM writes "
+                                   "the prompt → label image",
+                    "tooltip": "Optional: what this step does in one or two sentences – the breakdown line for "
+                               "this step. Same for every iteration of the step, like 'step'."}),
             },
             # EXECUTION_LIST gives access to values other nodes produced in this run (e.g. a prompt
             # joined by a text node) – used only where a value cannot be read from the graph itself.
@@ -126,10 +137,13 @@ class PertineoCollectMetadata:
     def run(self, workflow_purpose, reference_image_sources, external_software, changes_outside_comfyui, notes,
             compute_model_hashes, model_info_file, include_full_paths, source_image=None, output_image=None,
             fps=0.0, author="", company="", include_author=True, prompt=None, extra_pnginfo=None, unique_id=None,
-            execution_list=None, production_context=None):
+            execution_list=None, production_context=None, step="", step_description=""):
         manual = {"workflow_purpose": workflow_purpose, "reference_image_sources": reference_image_sources,
                   "external_software": external_software, "changes_outside_comfyui": changes_outside_comfyui,
                   "notes": notes}
+        for key, val in (("step", step), ("step_description", step_description)):
+            if isinstance(val, str) and val.strip():
+                manual[key] = val.strip()
         if include_author:
             for key, val in (("author", author), ("company", company)):
                 if isinstance(val, str) and val.strip():

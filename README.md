@@ -310,6 +310,8 @@ Every report lists the credits of the run: each model with creator and license, 
 
 Audit **every step**. An intermediate step (e.g. a layout or an asset) is `internal production asset`; the step that makes the finished result is `final deliverable`. Save Image + Metadata writes the SHA256 of each saved image into its report. When the next workflow loads that image, the same SHA256 appears there under *Input files* – the two reports are linked without any extra bookkeeping.
 
+**Steps and iterations are two different things.** `step` on Collect Metadata names the position in the pipeline (`01 – layout`, `02 – character insert`, `03 – upscale`) and stays the same for every iteration of that step. Each run of a step – a re-run, a variant, a take – is an iteration of its own: it is told apart by file name, time and the SHA256 of the saved image. Remarks on one iteration ("v03 – warmer light") go into `notes`. Which iteration went on is visible from the hashes: only its output SHA256 appears as an input of the next step. `step_description` is the breakdown line of the step.
+
 ### What the assessment is based on
 
 - **The workflow itself** (observed): executed nodes, models and their hashes, input files, settings, API nodes.
@@ -326,8 +328,20 @@ Audit **every step**. An intermediate step (e.g. a layout or an asset) is `inter
 
 - **Linked widgets** (e.g. steps and cfg from *KSampler Config (rgthree)*, a seed from a primitive or seed node, a value behind a boolean switch) are followed upstream to the constant. If a value is **computed** (text concatenation, math, an LLM, trigger words from LoRA Loader + Info …), the report shows the value that node actually produced **in this run**, taken from ComfyUI's output cache. For that, Collect Metadata has to run after those nodes – connect `output_image` (the final image), then it always runs last. If no run value is available, nothing is guessed – the report says `linked from <node type> #<id>, output <name>`.
 - Only nodes that actually contribute to an output count as part of the run. **Bypassed, muted and unconnected nodes** are summarised under *Inactive nodes – not part of the run* (counts, plus bypassed loaders with their model file); the full list is in the `.json`.
-- **Input files** (images, videos, audio, sequence folders) are listed with role, SHA256 and the nodes they feed – files in the ComfyUI input folder as `<input>/…`.
-- **Prompts written by an LLM / VLM** in the run (e.g. a prompt generator that describes a layout image) are recorded as produced and marked with the node that wrote them. Running the workflow again writes a new prompt, so the report says *reproducible only with the recorded values* – the same applies to a seed that is not fixed. A model that only feeds such a generator is listed as *VLM – used for: writes the prompt*.
+- **Input files** (images, videos, audio, sequence folders) are listed with SHA256 and **how they are used** – files in the ComfyUI input folder as `<input>/…`. Every loader in the workflow counts, also one that is not connected to an output (*not used*). The use is found by following the graph downstream from the loader (through resize, crop … nodes):
+
+  | Use | Meaning |
+  |---|---|
+  | `source` | Its pixels go into the result – img2img, inpaint, edit, video input, comp, matte plate. |
+  | `guidance` | Steers structure or area – ControlNet image, pose, depth, mask. Its pixels are not in the result. |
+  | `reference` | Steers style or likeness – IP-Adapter, CLIP vision, style model, face ID. |
+  | `prompt reference` | Read by a prompt writer (LLM / VLM) – it shapes the prompt, it is not in the image. |
+  | `preview only` | Only shown in a preview node. |
+  | `not used` | Loaded, but not connected to an output – not part of the run. |
+
+  The rights to *every* input that is used matter, also to a prompt reference – declare them in `reference_image_sources`.
+- **Prompts written by an LLM / VLM** in the run (e.g. a prompt generator that describes a layout image) are recorded as produced and marked with the node that wrote them. The section **Prompt generation** lists what each writer was given: images (with the number of the input file), instructions and presets, linked texts with the node they came from, settings such as seed and temperature, its model – and, for a chain of writers (e.g. a VLM that describes the image, then a prompt node that rewrites it), each step in order. Running the workflow again writes a new prompt, so the report says *reproducible only with the recorded values* – the same applies to a seed that is not fixed. A model that only feeds such a generator is listed as *VLM – used for: writes the prompt*.
+- **Workflow groups** are recorded in the `.json` only (`workflow_outline`): the groups in reading order with the nodes that ran in each – raw material for a breakdown across steps, not part of the printed report.
 - **Credentials:** inputs that look like an API key or token are replaced by `REDACTED` in the report and raise a high finding – they are still in the embedded workflow, remove them before sharing. Frontend-only nodes (KJNodes Set/Get, reroutes) are resolved by ComfyUI itself. Subgraph node ids (`12:5`) work.
 - **Packages and versions:** the version that is **installed and ran** (pyproject of the package folder; git checkouts add the commit). The package name comes from the node properties in the workflow (`cnr_id` / `aux_id`); if the version stored there differs, the report adds "workflow saved with …".
 - **Hashes** are cached in `<ComfyUI user dir>/pertineo_vfx/model_hash_cache.json` (key: path + size + modification time). The first run hashes large models once; later runs are instant. A changed or replaced file is hashed again.
@@ -398,6 +412,7 @@ Columns / fields per model – all optional, empty fields count as `UNKNOWN / NO
 | Collect | `source_image`, `output_image`, `fps` | – | Optional, for resolutions; `fps` > 0 adds frames and duration. |
 | Collect | `author`, `company` | empty | Who is responsible for the image. Shown in the title (`AUDIT REPORT – Name (Company)`) and header. The footer always names the tool (`Report by Pertineo VFX`). |
 | Collect | `production_context` | – | Optional, from *Pertineo Production Context*. Without it the triage is D (indeterminate). |
+| Collect | `step`, `step_description` | empty | Optional: which step of the pipeline this workflow is and what it does – the same for every iteration of the step (see *Multi-step work*). Shown in the report header. |
 | Collect | `include_author` | on | Off = author and company are left out of `.txt` and `.json` (they stay in the node). An embedded workflow still contains all widget values – also turn off `embed_workflow` if the name must not appear anywhere. |
 | Save | `output_folder` | empty | Empty = ComfyUI output folder, relative = inside it, absolute allowed. |
 | Save | `filename_prefix` | audit | Can be linked. A trailing image extension is removed; `sub/name` writes into a sub folder. |

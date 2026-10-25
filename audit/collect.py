@@ -1153,7 +1153,8 @@ def models(graph, executed, compute_hashes, info_entries, show, warn, self_id=No
     return result
 
 
-_GENERATOR_RE = re.compile(r"prompt|caption|llm|vlm|generate|describe|textgen|florence|joy|ollama|chat", re.I)
+_GENERATOR_RE = re.compile(r"prompt|caption|llm|vlm|generate|describe|textgen|florence|joy|ollama|chat|qwen.?vl|"
+                           r"llava|minicpm|moondream|internvl|molmo|smolvlm|janus|blip|tagger|interrogat|wd14", re.I)
 
 
 def consumers(graph, executed, nid):
@@ -1362,6 +1363,11 @@ def _mark_prompt_writers(graph, executed, result):
     for m in result:
         if m["role"] not in ("text_encoder", "vlm"):
             continue
+        if _GENERATOR_RE.search(graph.ctype(m["node_id"])) and m.get("input") not in ("clip",):
+            # the prompt node loads its model itself (e.g. a GGUF VLM node): it is the writer
+            m["role"] = "vlm"
+            m["used_for"] = "writes the prompt – " + graph.label(m["node_id"])
+            continue
         cons = consumers(graph, executed, m["node_id"])
         if not cons:
             continue
@@ -1471,7 +1477,9 @@ def _text_encoder_texts(graph, nid):
                 texts[k] = val
                 if chain and chain[-1] == "value produced in this run":
                     # text computed in this run (e.g. written by an LLM / VLM node) – remember by whom
-                    texts.setdefault("_computed_by", chain[0] if len(chain) > 1 else "a node in the graph")
+                    # the node that produced the value is the last hop before the run value (display / reroute
+                    # nodes in between are passed through)
+                    texts.setdefault("_computed_by", chain[-2] if len(chain) > 1 else "a node in the graph")
             elif not ok:
                 texts[k] = f"<{note}>"
     return texts or None
@@ -1697,6 +1705,11 @@ def collect(prompt, extra_pnginfo, unique_id, manual, compute_model_hashes, mode
     settings_full, notable, secrets = section("Node settings", lambda: A.node_settings(graph, executed, show, warn),
                                               ({}, [], []))
     data["node_settings"], data["notable_settings"], data["secrets"] = settings_full, notable, secrets
+    data["prompt_writers"] = section("Prompt writers", lambda: A.prompt_writers(
+        graph, executed, data["sampling"], data["input_assets"], data["models"], show), [])
+    outline = section("Workflow outline", lambda: A.workflow_outline(extra_pnginfo, graph, executed), None)
+    if outline:
+        data["workflow_outline"] = outline
     data["output_nodes"] = section("Output nodes", lambda: A.output_nodes(graph, executed, show), [])
     data["inactive_nodes"] = section("Inactive nodes", lambda: A.inactive_nodes(graph, executed, wf_nodes, show), [])
     sm = section("Seed mode", lambda: A.seed_mode(wf_nodes, A.seed_node_ids(graph, data["sampling"])), (None, None))

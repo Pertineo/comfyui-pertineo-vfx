@@ -3,6 +3,36 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.4.0 – 2026-10-25
+
+### Added
+- **Every input file is listed with how it is used:** *source* (its pixels go into the result), *guidance*
+  (ControlNet image, pose, depth, mask), *reference* (IP-Adapter, CLIP vision, style model, face ID), *prompt
+  reference* (read by an LLM / VLM prompt writer – it shapes the prompt, it is not in the image), *preview only*,
+  or *not used* (loaded, but not connected to an output). The section starts with a one-line summary; the legend
+  explains each use. An image that only feeds a prompt writer is therefore no longer a bare "image" without context.
+- New report section **PROMPT GENERATION**: for every LLM / VLM / prompt node that writes a prompt, what it was
+  given in this run – images (traced back to the input file and its number), instructions, presets, linked texts
+  (with the node they came from), settings such as seed and temperature, its model, and what an intermediate
+  writer wrote. Chains of writers (e.g. QwenVL → PixaromaAIPrompt) are listed in order. Credentials are redacted.
+  Texts longer than 512 words are shortened in the `.txt` / `.pdf`; the `.json` has them in full.
+- Collect Metadata: optional inputs **`step`** and **`step_description`** (at the end, existing workflows are
+  unchanged) – which step of the pipeline this workflow is, the same for every iteration of that step. Shown in the
+  report header.
+- The `.json` records the groups of the workflow (`workflow_outline`) with the nodes that ran in each – raw
+  material for a later breakdown across steps. Not printed in the `.txt` / `.pdf`.
+
+### Changed
+- Prompt writers are recognised by more node names (QwenVL, LLaVA, MiniCPM, Moondream, InternVL, Molmo, Janus,
+  BLIP, taggers / interrogators). A VLM node that loads its model itself is listed as *VLM – used for: writes
+  the prompt – <that node>*.
+- "Commercial use: OK" only mentions separate licenses when a model actually needs one
+  ("OK – all models allow it (1 through a separate license)").
+- The models section no longer prints the file name of the license table, only that the license data was
+  provided by the user (the `.json` still records the file name).
+- "Generated in this run (…)" names the node that actually produced the prompt, also when display or reroute
+  nodes sit in between.
+
 ## 1.3.0 – 2026-10-25
 
 ### Added

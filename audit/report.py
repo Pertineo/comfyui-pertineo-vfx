@@ -7,13 +7,15 @@
 """Plain-text rendering of the audit data, laid out for people (the JSON is for machines).
 
 Order: the file, the indicative triage, what to check first, the declared production context,
-the models and their licenses, inputs, how it was generated, outputs, inactive nodes, guiding
+the models and their licenses, inputs, how it was generated and what the
+prompt writers were given, outputs, inactive nodes, guiding
 principles, the author's declarations, and the technical environment last."""
 
 import re
 import textwrap
 
 from . import context as K
+from .assess import USE_LEGEND, USES as USE_ORDER, WRITER_TEXT_WORDS
 from .collect import NOT_PROVIDED, UNKNOWN_INFO, base_model_mismatches
 
 HEADER = "AUDIT REPORT"
@@ -156,6 +158,18 @@ def _to_check(data):
     return items
 
 
+def _wrap(text, indent):
+    return textwrap.wrap(text, WIDTH, initial_indent=indent, subsequent_indent=indent, break_long_words=False,
+                         break_on_hyphens=False)
+
+
+def _quote(text):
+    words = str(text).split()
+    t = " ".join(words[:WRITER_TEXT_WORDS]) + (" …" if len(words) > WRITER_TEXT_WORDS else "")
+    return "\u201c" + t + "\u201d"
+
+
+# --------------------------------------------------------------------------
 def render(data):
     data = data or {}
     f = data.get("file") or {}
@@ -180,6 +194,10 @@ def render(data):
     if company:
         L += _kv("Company", company)
     L += _kv("Purpose", _manual(data, "workflow_purpose") or NOT_PROVIDED)
+    if _manual(data, "step"):
+        L += _kv("Step", _manual(data, "step"))
+    if _manual(data, "step_description"):
+        L += _kv("Step description", _manual(data, "step_description"))
 
     ctx = data.get("context") or {}
     for key, label in K.TEXT_FIELDS[:3]:
@@ -196,7 +214,8 @@ def render(data):
         cu = lic.get("commercial_use")
         if cu:
             n = cu.get("models", 0)
-            txt = {"OK": "OK – all models allow it (incl. separate licenses)",
+            sep = lic.get("separate", 0)
+            txt = {"OK": "OK – all models allow it" + (f" ({sep} through a separate license)" if sep else ""),
                    "CHECK TERMS": f"CHECK TERMS for {n} model{'s' if n != 1 else ''} (e.g. revenue limits, "
                                   f"territories) – see To check",
                    "NOT PERMITTED": f"NOT PERMITTED for {n} model{'s' if n != 1 else ''} – see To check",
@@ -335,7 +354,10 @@ def render(data):
             L += _kv("Used for", _plain(m["used_for"]), indent=INDENT * 2)
         L.append("")
     info = (data.get("options") or {}).get("model_info_file")
-    L.append(f"{INDENT}License data from: {info or 'no model_info file'}")
+    # the file name says nothing to a reader – what matters is who provided the license data
+    L += _wrap("License data: provided by the user (the person who ran the workflow) – not read from the "
+               "workflow or the internet." if info else
+               "License data: none – no license table found.", INDENT)
     own = (data.get("options") or {}).get("model_info_disclaimer")
     if own:
         L += textwrap.wrap(f"Note from the model_info file: {own}", WIDTH, initial_indent=INDENT,
@@ -346,14 +368,25 @@ def render(data):
         ins = data.get("input_assets") or []
         L += _title(f"Input files ({len(ins)})")
         if not ins:
-            L.append(INDENT + "No input files found in the executed graph.")
+            L.append(INDENT + "No input files found in the workflow.")
+        uses = {}
+        for a in ins:
+            for u in a.get("used_as") or []:
+                uses[u["use"]] = uses.get(u["use"], 0) + 1
+        if uses:
+            L += _kv("Summary", " · ".join(f"{uses[u]} {u}" for u in USE_ORDER if u in uses))
+            L.append("")
         for n, a in enumerate(ins, 1):
-            L.append(f"{INDENT}{n}. {a['role']} – {a['file']}")
+            L.append(f"{INDENT}{a.get('index', n)}. {a['role']} – {a['file']}")
+            if a.get("used_as"):
+                L += _kv("Used as", "; ".join(u["use"] + (f" ({', '.join(_plain(v) for v in u['via'])})"
+                                                          if u["via"] else "") for u in a["used_as"]),
+                         indent=INDENT * 2)
             L += _kv("Location", a.get("location", "?") + (f" · {a['files_in_folder']} file(s)"
                                                            if "files_in_folder" in a else ""), indent=INDENT * 2)
             ash = str(a.get("sha256") or "not computed")
             L += _kv("SHA256", ash if re.fullmatch(r"[0-9a-f]{64}", ash) else f"{U} – {ash}", indent=INDENT * 2)
-            if a.get("feeds"):
+            if a.get("feeds") and not a.get("used_as"):  # data from 1.3.x
                 L += _kv("Used by", ", ".join(_plain(x) for x in a["feeds"]), indent=INDENT * 2)
         if ins:
             L.append(INDENT + "Rights of these inputs: see 'Reference images' and the production context.")
@@ -403,8 +436,9 @@ def render(data):
                 L += _kv(label, "–", indent=INDENT * 2)
             for e in encs:
                 if e.get("computed_by"):
+                    see = " – see PROMPT GENERATION" if data.get("prompt_writers") else ""
                     L += _kv(f"{role.capitalize()} source", f"generated in this run ({_plain(e['computed_by'])}) – "
-                             f"recorded as produced", indent=INDENT * 2)
+                             f"recorded as produced{see}", indent=INDENT * 2)
                 for k, t in e["texts"].items():
                     lab = label if k == "text" else f"{label} [{k}]"
                     if t.startswith("<linked from") or t.startswith("<linked"):
@@ -447,6 +481,49 @@ def render(data):
             vals = ", ".join(f"{k} {_fmt(v)}" for k, v in ns["settings"].items())
             L.append(f"{INDENT * 2}{ns['node_type']} #{ns['node_id']}")
             L += _kv("", vals, indent=INDENT * 3, key=0)
+
+    # ---- prompt generation ------------------------------------------------
+    pws = data.get("prompt_writers") or []
+    if pws:
+        L += _title("Prompt generation")
+        L += _wrap("What the prompt writers were given in this run – images, instructions, presets and linked "
+                   "texts. What each one wrote is recorded as produced.", INDENT)
+        L.append("")
+        for n, w in enumerate(pws, 1):
+            title = f"  \"{w['title']}\"" if w.get("title") and w["title"] != w["node_type"] else ""
+            L.append(f"{INDENT}{n}. {w['node_type']}{title}")
+            L += _kv("Writes", ", ".join(_plain(f) for f in w["feeds"]), indent=INDENT * 2)
+            if w.get("models"):
+                L += _kv("Model", ", ".join(m.split("/")[-1] for m in w["models"]), indent=INDENT * 2)
+            for im in w.get("images") or []:
+                if im["file_names"]:
+                    val = ", ".join(f"{f} (input {i})" for f, i in zip(im["file_names"], im["files"]))
+                elif im["produced_by"]:
+                    val = "produced in this run by " + ", ".join(_plain(x) for x in im["produced_by"])
+                else:
+                    val = f"{U} – source not found"
+                L += _kv(im["input"], val, indent=INDENT * 2)
+            for t in w.get("texts") or []:
+                if t.get("text") is None:
+                    val = f"{U} – {t.get('note') or 'not recorded'}"
+                elif t["text"] == "REDACTED":
+                    val = "REDACTED (credential-like value)"
+                else:
+                    val = _quote(t["text"])
+                    if t.get("from"):
+                        val += f"  (from {_plain(t['from'])})"
+                L += _kv(t["input"], val, indent=INDENT * 2)
+            if w.get("settings"):
+                L += _kv("Settings", " · ".join(f"{k} {_fmt(v)}" for k, v in w["settings"].items()),
+                         indent=INDENT * 2)
+            if w.get("output") and not any(f.startswith(("positive prompt", "negative prompt")) for f in w["feeds"]):
+                L += _kv("Wrote", _quote(w["output"]), indent=INDENT * 2)
+            L.append("")
+        if any(len(str(t.get("text") or "").split()) > WRITER_TEXT_WORDS
+               for w in pws for t in w.get("texts") or []) or \
+                any(len(str(w.get("output") or "").split()) > WRITER_TEXT_WORDS for w in pws):
+            L += _wrap(f"Texts longer than {WRITER_TEXT_WORDS} words are shortened here; the .json has them in "
+                       f"full.", INDENT)
 
     # ---- outputs ---------------------------------------------------------
     if data.get("output_nodes"):
@@ -569,6 +646,13 @@ def render(data):
                 mark = ">" if g == data["triage"]["grade"] else " "
                 L += textwrap.wrap(f"{K.TRIAGE[g]} – {K.TRIAGE_LEGEND[g]}", WIDTH,
                                    initial_indent=f"{INDENT}{mark} {g}  ", subsequent_indent=INDENT + " " * 5)
+            L.append("")
+        present = {u["use"] for a in data.get("input_assets") or [] for u in a.get("used_as") or []}
+        if present:
+            L.append(f"{INDENT}Input use – how an input file reaches the result:")
+            for u in [x for x in USE_ORDER if x in present]:
+                L += textwrap.wrap(USE_LEGEND[u], WIDTH, initial_indent=f"{INDENT}  {u:<19}  ",
+                                   subsequent_indent=INDENT + " " * 23)
             L.append("")
         graded = bool(data.get("triage") and data["triage"].get("grade"))
         # without a Production Context there is no grade: only what explains the findings is printed
