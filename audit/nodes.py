@@ -22,13 +22,15 @@ import folder_paths
 from ..common import LOG
 from ..image_io.readwrite import clean_path
 from . import collect as C
+from . import assess as A
 from . import context as K
 from .pdf import write_pdf as write_pdf_file
 from .imagefile import FORMATS, ext_for, write_exr_rgb, write_png8, write_png16
 from .report import HEADER, render
 
 CATEGORY = "Pertineo/Audit"
-SIDECAR_EXTS = (".txt", ".json", ".pdf")
+# 1.4.1: sidecars are named <image>.audit.* (plus .workflow.json); the plain names of 1.4.0 are still checked
+SIDECAR_EXTS = (".audit.txt", ".audit.json", ".audit.pdf", ".workflow.json", ".txt", ".json", ".pdf")
 ALL_EXTS = (".png", ".exr") + SIDECAR_EXTS
 _IMAGE_EXT_RE = re.compile(r"\.(png|jpe?g|webp|tiff?|exr|bmp|gif)$", re.I)
 
@@ -233,7 +235,7 @@ def _resolve_output(output_folder, filename_prefix):
 
 
 def _existing_max(folder, prefix):
-    pat = re.compile(re.escape(prefix) + r"_(\d+)\.[A-Za-z0-9]+$")
+    pat = re.compile(re.escape(prefix) + r"_(\d+)\.[A-Za-z0-9.]+$")  # also name_001.audit.txt
     best = 0
     try:
         for name in os.listdir(folder):
@@ -246,7 +248,7 @@ def _existing_max(folder, prefix):
 
 
 def _reserve(folder, prefix, digits, counter, ext):
-    """Finds the next number where no image, .txt or .json exists and creates the image file
+    """Finds the next number where no image or report file exists and creates the image file
     exclusively (O_EXCL), so parallel runs can never get the same name."""
     while True:
         base = f"{prefix}_{counter:0{digits}d}"
@@ -313,8 +315,8 @@ class PertineoSaveImageMetadata:
     FUNCTION = "run"
     OUTPUT_NODE = True
     DESCRIPTION = ("Saves images and their audit report with guaranteed identical base names "
-                   "(name_001.png + name_001.txt / .json). The counter skips every number where an image, "
-                   ".txt or .json already exists; nothing is ever overwritten. Every image of a batch gets "
+                   "(name_001.png + name_001.audit.txt / .audit.json / .audit.pdf). The counter skips every number "
+                   "where an image or report already exists; nothing is ever overwritten. Every image of a batch gets "
                    "its own file pair.")
 
     @classmethod
@@ -336,12 +338,15 @@ class PertineoSaveImageMetadata:
                     "tooltip": "PNG 8 bit (like Save Image), PNG 16 bit, or EXR 32-bit float. EXR values are "
                                "converted from sRGB to linear; the workflow is not embedded in EXR files."}),
                 "embed_workflow": ("BOOLEAN", {"default": True,
-                    "tooltip": "PNG only: embed prompt and workflow like the core Save Image node (the image can "
-                               "be dropped back into ComfyUI), plus the audit JSON if connected. Note: the "
-                               "embedded workflow contains everything typed into the nodes, including local "
-                               "paths – turn off for anonymised sharing."}),
-                "write_txt": ("BOOLEAN", {"default": True, "tooltip": "Write <name>.txt with the readable report."}),
-                "write_json": ("BOOLEAN", {"default": False, "tooltip": "Write <name>.json with the machine-readable report."}),
+                    "tooltip": "Embed prompt and workflow like the core Save Image node (PNG: the image can be "
+                               "dropped back into ComfyUI, plus the audit JSON if connected) and add the workflow "
+                               "to the .json (credentials redacted). Note: the workflow contains everything typed "
+                               "into the nodes, including local paths – turn off for anonymised sharing."}),
+                "write_txt": ("BOOLEAN", {"default": True, "tooltip": "Write <name>.audit.txt with the full readable report."}),
+                "write_json": ("BOOLEAN", {"default": False, "tooltip": "Write <name>.audit.json with the machine-readable report. With embed_workflow on it also "
+                                                       "carries the workflow that was run (needed for the audit chain), "
+                                                       "and <name>.workflow.json is written next to it – it opens "
+                                                       "directly in ComfyUI."}),
             },
             "optional": {
                 "metadata_text": ("STRING", {"forceInput": True,
@@ -349,9 +354,10 @@ class PertineoSaveImageMetadata:
                 "metadata_json": ("STRING", {"forceInput": True,
                     "tooltip": "metadata_json from Pertineo Collect Metadata."}),
                 "write_pdf": ("BOOLEAN", {"default": False,
-                    "tooltip": "Also write <name>.pdf: the readable report on A4 pages with a thumbnail of the "
-                               "image. Uses a standard PDF font – characters outside Western European scripts "
-                               "(e.g. Chinese) are shown as '?' with a note; the .txt / .json keep them."}),
+                    "tooltip": "Also write <name>.audit.pdf: the readable report on A4 pages with a thumbnail of "
+                               "the image – long lists are shortened (the header says so), the .audit.txt has them "
+                               "in full. Uses a standard PDF font – characters outside Western European scripts "
+                               "(e.g. Chinese) are shown as '?' with a note; the .audit.txt / .audit.json keep them."}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -423,29 +429,31 @@ class PertineoSaveImageMetadata:
                     per_json["file"] = dict(file_info)
             except OSError as e:
                 print(f"{LOG} Audit: could not hash {path} ({type(e).__name__})")
-            txt = None
+            txt = pdf_txt = None
             if write_txt or write_pdf:
                 if isinstance(meta, dict) and meta.get("schema") == C.SCHEMA:
                     try:  # re-render from the JSON so the file block sits in the header
-                        txt = render(per_json)
+                        txt = render(per_json)  # .txt: everything in full
+                        pdf_txt = render(per_json, short=True)  # PDF: long lists shortened, header says so
                     except Exception:
                         traceback.print_exc()
                         txt = _text_for(metadata_text, file_line)
                 else:
                     txt = _text_for(metadata_text, file_line)
+            pdf_txt = pdf_txt or txt
             if write_txt:
-                p = os.path.join(folder, base + ".txt")
+                p = os.path.join(folder, base + ".audit.txt")
                 with open(p, "x", encoding="utf-8") as f:
                     f.write(txt)
                 written.append(p)
             if write_pdf:
-                p = os.path.join(folder, base + ".pdf")
+                p = os.path.join(folder, base + ".audit.pdf")
                 try:
                     thumb = (np.clip(img[..., :3], 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
                     if thumb.shape[-1] == 1:
                         thumb = np.repeat(thumb, 3, axis=-1)
                     author = ((per_json or {}).get("manual") or {}).get("author")
-                    bad = write_pdf_file(p, txt, title=f"Audit report {base}", thumbnail=thumb, author=author)
+                    bad = write_pdf_file(p, pdf_txt, title=f"Audit report {base}", thumbnail=thumb, author=author)
                     if bad:
                         print(f"{LOG} Audit: {bad} character(s) cannot be shown in the PDF font – replaced by '?' "
                               f"(see note in the PDF; the .txt keeps them).")
@@ -454,9 +462,27 @@ class PertineoSaveImageMetadata:
                     traceback.print_exc()
                     print(f"{LOG} Audit: PDF could not be written ({type(e).__name__}: {e})")
             if write_json:
-                p = os.path.join(folder, base + ".json")
+                p = os.path.join(folder, base + ".audit.json")
+                out_json = dict(per_json or {})
+                # 1.4.1: the workflow belongs to the audit – the .json carries it (credentials redacted),
+                # and <name>.workflow.json next to it opens directly in ComfyUI
+                try:
+                    wf = A.workflow_for_json(prompt, extra_pnginfo) if embed_workflow else None
+                    if wf:
+                        if wf.get("workflow"):
+                            wp = os.path.join(folder, base + ".workflow.json")
+                            raw = json.dumps(wf["workflow"], indent=2, ensure_ascii=False, default=str).encode("utf-8")
+                            with open(wp, "xb") as f:
+                                f.write(raw)
+                            written.append(wp)
+                            wf = dict(wf, file=os.path.basename(wp), file_sha256=hashlib.sha256(raw).hexdigest(),
+                                      note="The workflow as it was run (credentials redacted). Open "
+                                           f"{os.path.basename(wp)} in ComfyUI to load it.")
+                        out_json["comfyui_workflow"] = wf
+                except Exception as e:
+                    print(f"{LOG} Audit: workflow not added to the .json ({type(e).__name__}: {e})")
                 with open(p, "x", encoding="utf-8") as f:
-                    json.dump(per_json, f, indent=2, ensure_ascii=False, default=str)
+                    json.dump(out_json, f, indent=2, ensure_ascii=False, default=str)
                 written.append(p)
             for p in written:
                 print(f"{LOG} Audit: wrote {p}")

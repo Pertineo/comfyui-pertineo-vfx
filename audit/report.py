@@ -75,7 +75,7 @@ def _kv(label, value, indent=INDENT, key=KEY):
 
 def _plain(label):
     """'PixaromaAIPrompt #109' -> 'PixaromaAIPrompt' – node numbers stay in the .json."""
-    return re.sub(r"\s+#[\w:]+(?=$|[,)])", "", str(label))
+    return re.sub(r"\s+#[\w:]+(?=$|[,)]|\s·)", "", str(label))
 
 
 def _fmt(v):
@@ -163,16 +163,37 @@ def _wrap(text, indent):
                          break_on_hyphens=False)
 
 
-def _quote(text):
+INACTIVE_LIST_PDF = 5  # 1.4.1: the PDF lists up to this many inactive nodes, the .txt lists all
+
+
+def _quote(text, limit=None):
     words = str(text).split()
-    t = " ".join(words[:WRITER_TEXT_WORDS]) + (" …" if len(words) > WRITER_TEXT_WORDS else "")
+    if limit is None:
+        return "\u201c" + str(text).strip() + "\u201d"
+    t = " ".join(words[:limit]) + (" …" if len(words) > limit else "")
     return "\u201c" + t + "\u201d"
 
 
+def _shortened(data):
+    """True when the short version (PDF) leaves something out that the .txt has."""
+    inact = data.get("inactive_nodes") or []
+    if len(inact) > max(INACTIVE_LIST_PDF, sum(1 for x in inact if x.get("model_files"))):
+        return True
+    for w in data.get("prompt_writers") or []:
+        if len(str(w.get("output") or "").split()) > WRITER_TEXT_WORDS:
+            return True
+        if any(len(str(t.get("text") or "").split()) > WRITER_TEXT_WORDS for t in w.get("texts") or []):
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------
-def render(data):
+def render(data, short=False):
+    """The readable report. short=False (.txt): everything in full. short=True (PDF): long lists and texts
+    are shortened, and the header says so when it happens."""
     data = data or {}
     f = data.get("file") or {}
+    limit = WRITER_TEXT_WORDS if short else None
     author, company = _manual(data, "author"), _manual(data, "company")
     who = " – ".join(x for x in [author, company] if x) if not (author and company) else f"{author} ({company})"
     title = f"{HEADER} – {who}" if who else HEADER
@@ -198,6 +219,9 @@ def render(data):
         L += _kv("Step", _manual(data, "step"))
     if _manual(data, "step_description"):
         L += _kv("Step description", _manual(data, "step_description"))
+    if short and _shortened(data):
+        full = f"{f['basename']}.audit.txt" if f.get("basename") else "the .audit.txt"
+        L += _kv("Note", f"Lists shortened – full report: {full}")
 
     ctx = data.get("context") or {}
     for key, label in K.TEXT_FIELDS[:3]:
@@ -374,7 +398,7 @@ def render(data):
             for u in a.get("used_as") or []:
                 uses[u["use"]] = uses.get(u["use"], 0) + 1
         if uses:
-            L += _kv("Summary", " · ".join(f"{uses[u]} {u}" for u in USE_ORDER if u in uses))
+            L += _kv("Summary", " · ".join(f"{uses[u]} × {u}" for u in USE_ORDER if u in uses))
             L.append("")
         for n, a in enumerate(ins, 1):
             L.append(f"{INDENT}{a.get('index', n)}. {a['role']} – {a['file']}")
@@ -382,6 +406,8 @@ def render(data):
                 L += _kv("Used as", "; ".join(u["use"] + (f" ({', '.join(_plain(v) for v in u['via'])})"
                                                           if u["via"] else "") for u in a["used_as"]),
                          indent=INDENT * 2)
+            if a.get("width") and a.get("height"):
+                L += _kv("Size", f"{a['width']} x {a['height']}", indent=INDENT * 2)
             L += _kv("Location", a.get("location", "?") + (f" · {a['files_in_folder']} file(s)"
                                                            if "files_in_folder" in a else ""), indent=INDENT * 2)
             ash = str(a.get("sha256") or "not computed")
@@ -423,7 +449,13 @@ def render(data):
         if "width" in lat:
             extra = "".join(f", {k.replace('_size', '')} {_fmt(lat[k])}" for k in ("batch_size", "length", "frames")
                             if k in lat)
+            if "latent_width" in lat:  # 1.4.1: read from the latent produced in this run
+                extra += f"  (latent {lat['latent_width']} x {lat['latent_height']} × VAE factor " \
+                         f"{_fmt(lat.get('vae_factor'))}, read from this run)"
             L += _kv("Latent", f"{lat['width']} x {lat['height']}{extra}", indent=INDENT * 2)
+        elif "latent_width" in lat:
+            L += _kv("Latent", f"latent {lat['latent_width']} x {lat['latent_height']} – {U} – VAE scale factor "
+                               f"not known, pixel size not recorded", indent=INDENT * 2)
         elif lat:
             note = lat.get("note", "?")
             if re.search(r"not followed|not resolved|too deep|missing node", note):
@@ -440,7 +472,7 @@ def render(data):
                     L += _kv(f"{role.capitalize()} source", f"generated in this run ({_plain(e['computed_by'])}) – "
                              f"recorded as produced{see}", indent=INDENT * 2)
                 for k, t in e["texts"].items():
-                    lab = label if k == "text" else f"{label} [{k}]"
+                    lab = label if (k == "text" or len(e["texts"]) == 1) else f"{label} [{k}]"
                     if t.startswith("<linked from") or t.startswith("<linked"):
                         t = f"{U} – {t.strip('<>')}"
                     L += _kv(lab, t if t.strip() else "(empty)", indent=INDENT * 2)
@@ -451,12 +483,30 @@ def render(data):
     for g in res.get("generation") or []:
         if "width" in g:
             gens.append(f"{g['width']} x {g['height']}" + ("  (encoded source image)" if g.get("same_as") else ""))
+        elif "latent_width" in g:
+            gens.append(f"{U} – latent {g['latent_width']} x {g['latent_height']}, VAE scale factor not known")
         else:
             note = g.get("note", "?")
             gens.append(f"{U} – size not recorded" if re.search(r"not followed|not resolved|too deep|missing node",
                                                                note) else note)
-    no_src = ("not connected – no source image in this run; inputs are listed under INPUT FILES"
-              if data.get("input_assets") else "– not connected –")
+    # 1.4.1: source_image of Collect Metadata is optional – name the inputs that are used as source instead
+    src_in = []
+    for a in data.get("input_assets") or []:
+        for u in a.get("used_as") or []:
+            if u.get("use") == "source":
+                slots = [m.group(1) for v in u.get("via") or [] for m in [re.search(r"·\s*(\S+)$", str(v))] if m]
+                name = str(a.get("file") or "?").rstrip("/").split("/")[-1]
+                src_in.append((slots[0] if slots else "", name))
+                break
+    if all(sl for sl, _n in src_in):  # sorted by the input they reach: image_1, image_2 …
+        src_in.sort()
+    src_in = [f"{n} → {sl}" if sl else n for sl, n in src_in]
+    if src_in:
+        no_src = "\n".join(src_in)  # one input file per line, named as under INPUT FILES
+    elif data.get("input_assets"):
+        no_src = "none – no input is used as source (see INPUT FILES)"
+    else:
+        no_src = "– not connected –"
     L += _kv("Source image", _size(res.get("source")) or no_src)
     L += _kv("Generated at", " / ".join(dict.fromkeys(gens)) if gens else "–")
     L += _kv("Final image", _size(res.get("final")) or "– not connected –")
@@ -509,7 +559,7 @@ def render(data):
                 elif t["text"] == "REDACTED":
                     val = "REDACTED (credential-like value)"
                 else:
-                    val = _quote(t["text"])
+                    val = _quote(t["text"], limit)
                     if t.get("from"):
                         val += f"  (from {_plain(t['from'])})"
                 L += _kv(t["input"], val, indent=INDENT * 2)
@@ -517,13 +567,13 @@ def render(data):
                 L += _kv("Settings", " · ".join(f"{k} {_fmt(v)}" for k, v in w["settings"].items()),
                          indent=INDENT * 2)
             if w.get("output") and not any(f.startswith(("positive prompt", "negative prompt")) for f in w["feeds"]):
-                L += _kv("Wrote", _quote(w["output"]), indent=INDENT * 2)
+                L += _kv("Wrote", _quote(w["output"], limit), indent=INDENT * 2)
             L.append("")
-        if any(len(str(t.get("text") or "").split()) > WRITER_TEXT_WORDS
-               for w in pws for t in w.get("texts") or []) or \
-                any(len(str(w.get("output") or "").split()) > WRITER_TEXT_WORDS for w in pws):
-            L += _wrap(f"Texts longer than {WRITER_TEXT_WORDS} words are shortened here; the .json has them in "
-                       f"full.", INDENT)
+        if short and (any(len(str(t.get("text") or "").split()) > WRITER_TEXT_WORDS
+                          for w in pws for t in w.get("texts") or []) or
+                      any(len(str(w.get("output") or "").split()) > WRITER_TEXT_WORDS for w in pws)):
+            L += _wrap(f"Texts longer than {WRITER_TEXT_WORDS} words are shortened here; the .audit.txt has them "
+                       f"in full.", INDENT)
 
     # ---- outputs ---------------------------------------------------------
     if data.get("output_nodes"):
@@ -540,10 +590,18 @@ def render(data):
         for x in inact:
             counts[x["state"]] = counts.get(x["state"], 0) + 1
         L += _title("Inactive nodes – not part of the run")
-        L += _kv("Summary", " · ".join(f"{n} {st}" for st, n in counts.items()) + " (full list in the .json)")
-        with_models = [x for x in inact if x.get("model_files")]
-        for x in with_models:
-            L += _kv("•", f"{x['node_type']} – {x['state']}: {', '.join(x['model_files'])}", key=2)
+        L += _kv("Summary", " · ".join(f"{n} {st}" for st, n in counts.items()))
+        # 1.4.1: listed by name – all of them in the .txt, the first few in the PDF
+        # loaders with model files first – in the PDF they are always shown, the rest fills up to the limit
+        ordered = [x for x in inact if x.get("model_files")] + [x for x in inact if not x.get("model_files")]
+        n_show = max(INACTIVE_LIST_PDF, sum(1 for x in inact if x.get("model_files"))) if short else len(ordered)
+        for x in ordered[:n_show]:
+            title = f" \"{x['title']}\"" if x.get("title") and x["title"] != x["node_type"] else ""
+            models = f": {', '.join(x['model_files'])}" if x.get("model_files") else ""
+            L += _kv("•", f"{x['node_type']}{title} – {x['state']}{models}", key=2, indent=INDENT * 2)
+        if len(ordered) > n_show:
+            L += _kv("", f"… and {len(ordered) - n_show} more (full list in the .audit.txt)", key=2,
+                     indent=INDENT * 2)
 
     # ---- principles ------------------------------------------------------
     if data.get("principles"):
@@ -672,5 +730,5 @@ def render(data):
         f"Report by Pertineo VFX {data.get('generator', {}).get('version', '?')} · collected "
         f"{_date(data.get('generated'))} · {g.get('nodes_executed', '?')} of {g.get('nodes_in_prompt', '?')} "
         f"nodes contributed to the output; bypassed and muted nodes are not part of the run. "
-        f"Machine-readable version: the .json with the same name (when write_json is on).", WIDTH)
+        f"Machine-readable version: the .audit.json with the same name (when write_json is on).", WIDTH)
     return "\n".join(L).rstrip() + "\n"

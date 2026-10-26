@@ -24,7 +24,7 @@ MAX_COLS = int((PAGE_W - 2 * MARGIN_X) / (0.6 * FONT_SIZE))  # Courier: every gl
 _MAP = {"─": "\u2014", "═": "=", "━": "-", "│": "|", "→": "->", "←": "<-", "✓": "v", "✗": "x", "≈": "~",
         "≤": "<=", "≥": ">=", "\u00a0": " ", "\u2009": " ", "\u202f": " ", "\t": "    "}
 NON_LATIN_NOTE = ("Note: this PDF uses a standard font that cannot show some characters of the report "
-                  "(e.g. Chinese, Japanese, Cyrillic or emoji). They are replaced by '?'. The .txt and .json "
+                  "(e.g. Chinese, Japanese, Cyrillic or emoji). They are replaced by '?'. The .audit.txt and .audit.json "
                   "files contain the complete text.")
 
 

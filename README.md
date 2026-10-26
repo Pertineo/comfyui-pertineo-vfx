@@ -119,7 +119,7 @@ Nodes that record **what an image was made with** – for clients, license quest
 
 ```
 … ──► VAE Decode ──┬──────────────────────────────► Save Image + Metadata ──► shot_001.png
-                   └─► Collect Metadata ──text/json─┘                         shot_001.txt / .json / .pdf
+                   └─► Collect Metadata ──text/json─┘                         shot_001.audit.txt / .json / .pdf
 Production Context ──┘
 ```
 
@@ -127,7 +127,7 @@ Production Context ──┘
 |---|---|
 | **Pertineo Collect Metadata** | Reads the executed graph at run time (no widgets needed) and collects: environment (ComfyUI, frontend, Python, torch, CUDA, GPU, OS), every model file with **SHA256** and **AutoV2** (Civitai short hash), **source / license / commercial use** from your `model_info` table, custom node packages with versions, API nodes, sampler settings (seed, steps, cfg / guidance, sampler, scheduler, denoise, latent size), positive and negative prompts per sampler, and source / generation / final resolution (plus frames, fps and duration for video). In addition: input files with SHA256, bypassed / muted / unconnected nodes (listed as *not part of the run*), seed control mode, the settings of every executed node (credentials redacted), save nodes, workflow type, identity-related capabilities (face swap, identity adapters, voice / lip-sync …), reproducibility, and **findings with severity and the department they belong to**, an indicative **triage (A–D)** and five **guiding principles**. Adds five manual audit fields. Outputs `metadata_text` and `metadata_json`. |
 | **Pertineo Production Context** | Declares the production context: production, project / episode, shot, purpose (ideation … final deliverable), final result, story-critical, execution environment, unreleased material, personal data, talent likeness / voice, third-party material, trademarks, union / guild-covered work, whether external tools store / train on the data, which approvals and consents are on file, and the reviewers. Connect to `production_context` of Collect Metadata. Everything here is recorded as **declared**, never as verified. Each setting is explained [below](#production-context--what-each-setting-means). |
-| **Pertineo Save Image + Metadata** | Saves the images plus `.txt` and/or `.json` with **guaranteed identical base names**: the counter skips every number where an image, `.txt` or `.json` already exists, so `name_004.png` can never sit next to `name_003.txt`. Every image of a batch gets its own pair (the report states the batch index). Never overwrites. PNG 8 bit, PNG 16 bit or EXR 32-bit float. Embeds prompt and workflow like the core Save Image node. Optional **PDF** of the report (A4, with a thumbnail). Records the **SHA256 of the saved image** in the report, so a later workflow that loads it can be linked to this one. |
+| **Pertineo Save Image + Metadata** | Saves the images plus `.audit.txt` and/or `.audit.json` with **guaranteed identical base names**: the counter skips every number where an image or report already exists, so `name_004.png` can never sit next to `name_003.audit.txt`. Every image of a batch gets its own pair (the report states the batch index). Never overwrites. PNG 8 bit, PNG 16 bit or EXR 32-bit float. Embeds prompt and workflow like the core Save Image node. Optional **PDF** of the report (A4, with a thumbnail). Records the **SHA256 of the saved image** in the report, so a later workflow that loads it can be linked to this one. |
 | **Pertineo LoRA Loader + Info** | Loads a LoRA like the core LoRA loader and additionally outputs what your `model_info` table says about it: `trigger_words` (comma-separated, ready to join into a prompt), `base_model` and a short `info` text with license and source. The LoRA is chosen only once, so loader and info always match. `clip` is optional (model-only LoRAs). A missing entry never stops the run. |
 | **Pertineo Model Info (…)** | Look up your own records without loading anything: one node per model type (LoRA, Checkpoint, Diffusion Model, VAE, Text Encoder, ControlNet, Upscaler), each with the same file list as the matching loader. Outputs `name`, `base_model`, `trigger_words`, `recommended`, `license` and an `info` text – connect `info` to *Preview Any* to read it. Useful for LoRAs loaded by other loaders and for recommended settings of a checkpoint. Not listed as a model in the audit report, as it loads nothing. |
 
@@ -135,7 +135,7 @@ An example is in `example_workflows/audit_example.json`.
 
 ### Example report (shortened)
 
-The `.txt` is laid out for people: the indicative triage and the open points first, then the declared production context, the models and their licenses, inputs, how the image was generated, outputs, inactive nodes, guiding principles, your own declarations, and the technical environment last. The `.json` holds the same content for machines (plus all node settings); the optional `.pdf` is the `.txt` on A4 pages.
+The `.txt` is laid out for people: the indicative triage and the open points first, then the declared production context, the models and their licenses, inputs, how the image was generated, outputs, inactive nodes, guiding principles, your own declarations, and the technical environment last. The `.audit.json` holds the same content for machines (plus all node settings and the workflow) – for tools such as the planned audit chain; the optional `.audit.pdf` is the `.audit.txt` on A4 pages, with long lists shortened (the header then says so).
 
 ```
 AUDIT REPORT – Jane Doe (Example Studio)
@@ -233,7 +233,7 @@ LEGEND ────────────────────────�
   …
 ```
 
-The report is meant to stay readable: node numbers, the full list of inactive nodes and all node settings are in the `.json`; the `.txt` / `.pdf` show what a reviewer needs. Scale, severity and evidence terms are explained once, in the **LEGEND** at the end of every report.
+The report is meant to stay readable: node numbers and all node settings are in the `.audit.json`; the `.audit.txt` / `.audit.pdf` show what a reviewer needs. The `.audit.txt` is always complete (every inactive node, every prompt text in full); the PDF lists up to five inactive nodes and shortens texts over 512 words. Scale, severity and evidence terms are explained once, in the **LEGEND** at the end of every report.
 
 ### Findings, triage and guiding principles
 
@@ -398,7 +398,7 @@ Columns / fields per model – all optional, empty fields count as `UNKNOWN / NO
 ### Sharing reports and images
 
 - `include_full_paths` is **off** by default: reports contain only file names and sub folders relative to the model folder (`diffusion_models/3D/model.safetensors`), no local paths like `/mnt/…` or your home folder. Turn it on for purely internal records.
-- `embed_workflow` writes the workflow into the PNG as the core Save Image node does. The workflow contains everything typed into any node – including local paths in other nodes' widgets. For anonymised sharing turn `embed_workflow` off and pass on the `.txt` / `.json`.
+- `embed_workflow` writes the workflow into the PNG as the core Save Image node does, and into the `.json` plus a `<name>.workflow.json` that opens directly in ComfyUI (credentials redacted). The workflow contains everything typed into any node – including local paths in other nodes' widgets. For anonymised sharing turn `embed_workflow` off and pass on the `.audit.txt` / `.audit.pdf` / `.audit.json`.
 - The report documents what ComfyUI saw. Manual fields (reference images, external software, changes outside ComfyUI) and the Production Context are your statement – fill them in before delivering.
 
 ### Parameters
@@ -413,14 +413,14 @@ Columns / fields per model – all optional, empty fields count as `UNKNOWN / NO
 | Collect | `author`, `company` | empty | Who is responsible for the image. Shown in the title (`AUDIT REPORT – Name (Company)`) and header. The footer always names the tool (`Report by Pertineo VFX`). |
 | Collect | `production_context` | – | Optional, from *Pertineo Production Context*. Without it the triage is D (indeterminate). |
 | Collect | `step`, `step_description` | empty | Optional: which step of the pipeline this workflow is and what it does – the same for every iteration of the step (see *Multi-step work*). Shown in the report header. |
-| Collect | `include_author` | on | Off = author and company are left out of `.txt` and `.json` (they stay in the node). An embedded workflow still contains all widget values – also turn off `embed_workflow` if the name must not appear anywhere. |
+| Collect | `include_author` | on | Off = author and company are left out of the reports (they stay in the node). An embedded workflow still contains all widget values – also turn off `embed_workflow` if the name must not appear anywhere. |
 | Save | `output_folder` | empty | Empty = ComfyUI output folder, relative = inside it, absolute allowed. |
 | Save | `filename_prefix` | audit | Can be linked. A trailing image extension is removed; `sub/name` writes into a sub folder. |
 | Save | `counter_digits` | 3 | `_001`. |
 | Save | `format` | png (8 bit) | PNG 8 bit, PNG 16 bit, EXR 32-bit float (converted from sRGB to linear, no embedded workflow; needs OpenEXR). |
-| Save | `embed_workflow` | on | PNG: prompt, workflow and audit JSON in the file. |
-| Save | `write_txt` / `write_json` | on / off | Which sidecar files to write. |
-| Save | `write_pdf` | off | Also write the report as `.pdf` (A4, thumbnail of the image on page 1, no extra dependency). The PDF uses a standard font that only covers Western European characters: Chinese, Japanese, Cyrillic or emoji (e.g. in a prompt) become `?` and the PDF says so at the top – the `.txt` and `.json` keep the complete text. |
+| Save | `embed_workflow` | on | PNG: prompt, workflow and audit JSON in the file. `.json`: the workflow that was run (credentials redacted). |
+| Save | `write_txt` / `write_json` | on / off | Which sidecar files to write. `write_json` with `embed_workflow` also writes `<name>.workflow.json`. |
+| Save | `write_pdf` | off | Also write the report as `.audit.pdf` (A4, thumbnail of the image on page 1, no extra dependency). The PDF uses a standard font that only covers Western European characters: Chinese, Japanese, Cyrillic or emoji (e.g. in a prompt) become `?` and the PDF says so at the top – the `.audit.txt` and `.audit.json` keep the complete text. |
 | Save | – | – | The report always contains the **SHA256 of the saved image** (not inside the PNG itself – a file cannot contain its own hash). |
 
 Outputs of Save: `saved_basename` (name without extension, one per line for batches) and `saved_paths` (all written files).

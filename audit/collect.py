@@ -180,6 +180,23 @@ class Graph:
         except Exception:
             return None
 
+    def runtime_object(self, nid, idx):
+        """Any value a node produced in this run (tensor dicts, VAE objects …), or None. Only read, never
+        guessed – used for sizes that exist only at run time (e.g. a latent made by a text encoder)."""
+        cache = getattr(self.execution_list, "output_cache", None)
+        if cache is None or not hasattr(cache, "get_local"):
+            return None
+        try:
+            outs = getattr(cache.get_local(nid), "outputs", None)
+            if outs is None or idx >= len(outs):
+                return None
+            v = outs[idx]
+            if isinstance(v, (list, tuple)) and len(v) == 1:
+                v = v[0]
+            return v
+        except Exception:
+            return None
+
     def _computed(self, src, idx, unresolved, chain):
         """Last resort for a computed value: what the node produced in this run, never a guess."""
         v = self.runtime_value(src, idx)
@@ -1462,6 +1479,22 @@ def _collect_params(graph, nid, params, unresolved, sources, keys, depth, follow
             _collect_params(graph, v[0], params, unresolved, sources, keys, depth - 1, follow)
 
 
+def _split_by_output(texts, out_name, role):
+    """1.4.1: an encoder with a positive and a negative text field (e.g. TextEncodeQwenImage21: prompt +
+    negative_prompt, outputs positive / negative) feeds both sampler inputs. Keep only the field that belongs
+    to the output the link comes from – by output name, else by the sampler input being traced."""
+    neg = [k for k in texts if not k.startswith("_") and "negative" in k]
+    pos = [k for k in texts if not k.startswith("_") and "negative" not in k]
+    if not neg or not pos:
+        return texts
+    o = str(out_name or "").lower()
+    side = "negative" if "neg" in o else "positive" if "pos" in o else role
+    drop = set(pos if side == "negative" else neg)
+    if texts.get("_computed_key") in drop:
+        drop |= {"_computed_by", "_computed_key"}
+    return {k: v for k, v in texts.items() if k not in drop}
+
+
 def _text_encoder_texts(graph, nid):
     ins = graph.inputs(nid)
     ct = graph.ctype(nid)
@@ -1480,6 +1513,7 @@ def _text_encoder_texts(graph, nid):
                     # the node that produced the value is the last hop before the run value (display / reroute
                     # nodes in between are passed through)
                     texts.setdefault("_computed_by", chain[-2] if len(chain) > 1 else "a node in the graph")
+                    texts.setdefault("_computed_key", k)
             elif not ok:
                 texts[k] = f"<{note}>"
     return texts or None
@@ -1503,12 +1537,15 @@ def trace_prompts(graph, start, role, extra):
                           "zeroed": True})
             continue
         texts = _text_encoder_texts(graph, nid)
+        if texts is not None:
+            texts = _split_by_output(texts, graph.output_name(nid, v[1]), role)
         ins = graph.inputs(nid)
         if "guidance" in ins and "guidance" not in extra:
             ok, val, note, _c = graph.resolve(ins["guidance"])
             extra["guidance"] = val if ok else note
         if texts is not None:
             entry = {"node_id": nid, "node_type": graph.ctype(nid), "title": graph.title(nid), "texts": texts}
+            texts.pop("_computed_key", None)
             if "_computed_by" in texts:
                 entry["computed_by"] = texts.pop("_computed_by")
             found.append(entry)
@@ -1523,7 +1560,43 @@ def trace_prompts(graph, start, role, extra):
     return sorted(found, key=lambda f: _id_key(f["node_id"]))
 
 
+def _vae_factor(graph, sampler_id):
+    """Spatial downscale factor (h, w) of the VAE that decodes this sampler's output, as reported by the
+    loaded VAE object in this run – or None."""
+    for c, node in graph.nodes.items():
+        cins = (node or {}).get("inputs") or {}
+        if not (is_link(cins.get("samples")) and cins["samples"][0] == sampler_id and is_link(cins.get("vae"))):
+            continue
+        vae = graph.runtime_object(cins["vae"][0], cins["vae"][1])
+        r = getattr(vae, "downscale_ratio", None)
+        if isinstance(r, int) and r > 0:
+            return r, r
+        if isinstance(r, (list, tuple)) and len(r) >= 2 and all(isinstance(x, int) for x in r[-2:]):
+            return r[-2], r[-1]
+    return None
+
+
+def _runtime_latent(graph, src, idx, sampler_id):
+    """Size of a latent as it was produced in this run (from the output cache)."""
+    lat = graph.runtime_object(src, idx)
+    t = lat.get("samples") if isinstance(lat, dict) else None
+    shape = getattr(t, "shape", None)
+    if shape is None or len(shape) < 4:
+        return None
+    lh, lw = int(shape[-2]), int(shape[-1])
+    info = {"from": graph.label(src), "latent_width": lw, "latent_height": lh,
+            "note": "values produced in this run"}
+    f = _vae_factor(graph, sampler_id)
+    if f:
+        info["width"], info["height"] = lw * f[1], lh * f[0]
+        info["vae_factor"] = f[0] if f[0] == f[1] else list(f)
+    else:
+        info["note"] = "latent produced in this run – VAE scale factor not known"
+    return info
+
+
 def latent_info(graph, nid, source_link=None):
+    sampler_id = nid
     ins = graph.inputs(nid)
     v = ins.get("latent_image", ins.get("latent"))
     for _ in range(8):
@@ -1569,6 +1642,9 @@ def latent_info(graph, nid, source_link=None):
                 h = graph.runtime_value(src, names.index("height"))
                 if isinstance(w, int) and isinstance(h, int):
                     return {"from": graph.label(src), "width": w, "height": h, "note": "values produced in this run"}
+            rt = _runtime_latent(graph, src, v[1], sampler_id)
+            if rt:
+                return rt
             return {"from": graph.label(src), "note": "latent source not followed further"}
         v = nxt
     return {"note": "latent source too deep to follow"}

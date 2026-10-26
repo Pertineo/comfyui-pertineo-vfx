@@ -116,11 +116,16 @@ def seed_mode(wf_nodes, node_ids):
         if not n:
             continue
         wv0 = n.get("widgets_values")
-        if "rgthree" in str(n.get("type", "")).lower() and "seed" in str(n.get("type", "")).lower() \
-                and isinstance(wv0, list) and wv0 and isinstance(wv0[0], int):
-            # Seed (rgthree): -1 = random each run, -2 / -3 = increment / decrement, any other value is fixed
-            return {-1: "randomize", -2: "increment", -3: "decrement"}.get(wv0[0], "fixed"), nid
         named = n.get("widgets_values_named")
+        if "rgthree" in str(n.get("type", "")).lower() and "seed" in str(n.get("type", "")).lower():
+            # Seed (rgthree): -1 = random each run, -2 / -3 = increment / decrement, any other value is fixed.
+            # 1.4.1: the named widget keeps what the user set (-1); widgets_values already holds the seed that
+            # was rolled for this run – so the named value wins when the frontend provides it
+            v = named.get("seed") if isinstance(named, dict) else None
+            if not isinstance(v, int) or isinstance(v, bool):
+                v = wv0[0] if isinstance(wv0, list) and wv0 and isinstance(wv0[0], int) else None
+            if v is not None:
+                return {-1: "randomize", -2: "increment", -3: "decrement"}.get(v, "fixed"), nid
         if isinstance(named, dict) and named.get("control_after_generate") in SEED_MODES:
             return named["control_after_generate"], nid
         wv = n.get("widgets_values")
@@ -151,6 +156,26 @@ def _resolve_input(value):
     if os.path.isabs(p) and os.path.exists(p):
         return p, "folder" if os.path.isdir(p) else "file"
     return None, None
+
+
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".exr")
+
+
+def _image_size(path):
+    """(width, height) from the file header, or None. Reads only the header."""
+    try:
+        if path.lower().endswith(".exr"):
+            import OpenEXR
+
+            with OpenEXR.File(path, header_only=True) as f:
+                (x0, y0), (x1, y1) = f.header()["dataWindow"]
+                return int(x1 - x0 + 1), int(y1 - y0 + 1)
+        from PIL import Image
+
+        with Image.open(path) as im:
+            return int(im.size[0]), int(im.size[1])
+    except Exception:
+        return None
 
 
 def _input_role(ct, name, value):
@@ -186,9 +211,20 @@ def input_assets(graph, executed, show, warn, compute_hashes=True):
     try:
         import folder_paths
 
-        input_dir = os.path.realpath(folder_paths.get_input_directory())
+        configured = os.path.abspath(folder_paths.get_input_directory())
+        input_dir = os.path.realpath(configured)
+        default_dir = os.path.abspath(os.path.join(folder_paths.base_path, "input"))
     except Exception:
-        input_dir = None
+        configured = input_dir = default_dir = None
+    # 1.4.1: say where the input folder really is – set with --input-directory, or linked elsewhere
+    if input_dir is None:
+        input_label = "ComfyUI input folder"
+    elif configured != default_dir:
+        input_label = "custom ComfyUI input folder (--input-directory)"
+    elif input_dir != configured:
+        input_label = "ComfyUI input folder (linked to another location)"
+    else:
+        input_label = "ComfyUI input folder"
     exe = set(executed)
     others = [n for n in graph.nodes if n not in exe]
     for nid in list(executed) + others:
@@ -213,7 +249,7 @@ def input_assets(graph, executed, show, warn, compute_hashes=True):
             real = os.path.realpath(full) if full else None
             if real and input_dir and real.startswith(input_dir + os.sep):
                 entry["file"] = "<input>/" + os.path.relpath(real, input_dir).replace(os.sep, "/")
-                entry["location"] = "ComfyUI input folder"
+                entry["location"] = input_label
             elif real:
                 entry["file"] = show.path(full) if show.full else os.path.basename(real.rstrip(os.sep)) + (
                     "/" if kind == "folder" else "")
@@ -224,6 +260,10 @@ def input_assets(graph, executed, show, warn, compute_hashes=True):
                 entry["location"] = "not found"
             if show.full and full:
                 entry["path"] = full
+            if kind == "file" and low.endswith(_IMAGE_EXTS):
+                size = _image_size(full)
+                if size:
+                    entry["width"], entry["height"] = size
             if kind == "file" and compute_hashes:
                 try:
                     sha, _cached = hashing.sha256_file(full, label=os.path.basename(full))
@@ -327,6 +367,15 @@ def _scalar_output(graph, nid, idx):
     return t in ("INT", "FLOAT", "STRING", "BOOLEAN")
 
 
+_IMAGE_INPUT_RE = re.compile(r"(^|[._])(image|images|img|pixels|reference|ref)(_?\d+)?$", re.I)
+
+
+def _image_inputs(graph, nid):
+    """Linked inputs of a node that take an image (image_1, image_2, images.image_1 …)."""
+    return [k for k, v in graph.inputs(nid).items()
+            if isinstance(v, list) and len(v) == 2 and _IMAGE_INPUT_RE.search(k.split(".")[-1])]
+
+
 def input_use(graph, executed, nid):
     """[{use, via: [node labels]}] – how the output of a loader reaches the result. Pass-through nodes (resize,
     crop, colour …) are followed; the first node that consumes the image in a known way decides."""
@@ -364,8 +413,18 @@ def input_use(graph, executed, nid):
             use = "source"
         if use:
             found.setdefault(use, [])
-            if graph.label(c) not in found[use]:
-                found[use].append(graph.label(c))
+            lab = graph.label(c)
+            if use != "preview only" and len(_image_inputs(graph, c)) > 1:
+                lab += " · " + name.split(".")[-1]  # 1.4.1: which input of a multi-image node, e.g. image_1
+            if lab not in found[use]:
+                found[use].append(lab)
+            if use != "preview only":
+                continue
+            # preview nodes can pass the image on (newer ComfyUI: PreviewImage has an images output) –
+            # record the preview and keep following whatever takes its output
+            for c2, n2, i2 in _edges_from(graph, executed, c):
+                if not _scalar_output(graph, c, i2):
+                    stack.append((c2, n2, i2, depth + 1, graph.output_name(c, i2)))
             continue
         nxt = _edges_from(graph, executed, c)
         if not nxt:
@@ -390,7 +449,7 @@ _SKIP_WRITER_RE = re.compile(r"model|quant|device|attention|dtype|precision|keep
                              r"cpu|vram|clip|vae|upload|^lora", re.I)
 _WRITER_SETTING_KEYS = re.compile(r"seed|temperature|top_p|top_k|min_p|max_tokens|max_new_tokens|max_length|"
                                   r"repetition_penalty|num_beams|do_sample|length", re.I)
-WRITER_TEXT_WORDS = 512  # .txt / .pdf; the .json keeps every text in full
+WRITER_TEXT_WORDS = 512  # PDF only; the .audit.txt and .audit.json keep every text in full
 
 
 def _upstream_files(graph, link, assets_by_node, depth=0, seen=None):
@@ -598,6 +657,62 @@ def workflow_outline(extra_pnginfo, graph, executed):
                     "inactive": [m for m in mem if m["state"] != "run"]})
     return {"groups": out, "ungrouped": [m for m in ungrouped if m["state"] == "run"],
             "ungrouped_inactive": len([m for m in ungrouped if m["state"] != "run"])}
+
+
+# --------------------------------------------------------------------------
+# Workflow copy for the .json (1.4.1)
+# --------------------------------------------------------------------------
+def _secret_values(prompt, workflow):
+    """Strings that look like credentials: values of secret-named inputs (API prompt, named widgets of the
+    UI workflow) and values that match a known key format."""
+    vals = set()
+    for node in (prompt or {}).values():
+        for name, v in ((node or {}).get("inputs") or {}).items() if isinstance(node, dict) else ():
+            if isinstance(v, str) and v.strip() and (_SECRET_NAME_RE.search(name) or _SECRET_VALUE_RE.match(v.strip())):
+                vals.add(v)
+
+    def walk(o):
+        if isinstance(o, dict):
+            named = o.get("widgets_values_named")
+            if isinstance(named, dict):
+                for name, v in named.items():
+                    if isinstance(v, str) and v.strip() and _SECRET_NAME_RE.search(str(name)):
+                        vals.add(v)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(workflow)
+    return vals
+
+
+def redacted_copy(obj, secrets):
+    """Deep copy of a workflow / prompt with every credential-looking string replaced by REDACTED."""
+    if isinstance(obj, dict):
+        return {k: redacted_copy(v, secrets) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [redacted_copy(v, secrets) for v in obj]
+    if isinstance(obj, str) and obj.strip() and (obj in secrets or _SECRET_VALUE_RE.match(obj.strip())):
+        return "REDACTED"
+    return obj
+
+
+def workflow_for_json(prompt, extra_pnginfo):
+    """{"workflow": UI workflow, "prompt": API prompt} with credentials redacted, or None."""
+    wf = (extra_pnginfo or {}).get("workflow") if isinstance(extra_pnginfo, dict) else None
+    if not wf and not prompt:
+        return None
+    secrets = _secret_values(prompt, wf)
+    out = {"note": "The workflow as it was run. Credentials are redacted. To load it in ComfyUI, save the "
+                   "'workflow' object as its own .json file."}
+    if wf:
+        out["workflow"] = redacted_copy(wf, secrets)
+    if prompt:
+        out["prompt"] = redacted_copy(prompt, secrets)
+    out["redacted"] = len(secrets)
+    return out
 
 
 # --------------------------------------------------------------------------

@@ -3,6 +3,48 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.4.1 – 2026-10-26
+
+### Fixed
+- **Positive prompt shown as negative prompt:** an encoder with a positive and a negative text field that feeds
+  both sampler inputs (e.g. `TextEncodeQwenImage21`: `prompt` + `negative_prompt`, outputs *positive* /
+  *negative*) showed both texts under both labels. Each side now shows only its own text, chosen by the output
+  the link comes from.
+- **Input wrongly listed as *preview only*:** when a preview node passes the image on (newer ComfyUI:
+  `PreviewImage` has an `images` output), the audit stopped at the preview. It now follows the image further, so
+  an image that reaches the model through a preview node is listed as *source* (or guidance / reference …).
+- **Latent size UNKNOWN** when the latent is made by a node itself (e.g. the `latent` output of
+  `TextEncodeQwenImage21`): the size is now read from the latent produced in this run and multiplied by the scale
+  factor of the VAE that decodes it. If the factor cannot be read, the latent size is shown and the pixel size
+  stays UNKNOWN – nothing is guessed.
+- **Source image "not connected"** although inputs went into the result: the line now names the input files used as
+  *source*, one per line. Connecting `source_image` to Collect Metadata is still optional.
+- **Seed control "fixed" although rgthree Seed was set to random (-1):** the frontend stores the rolled seed in the
+  workflow, the setting itself only in the named widget value. The setting is now read from there, so a random seed
+  shows as *randomize* and the run as *reproducible only with the recorded values*.
+- **Input location:** an input folder set with `--input-directory` is shown as *custom ComfyUI input folder*, an
+  `input` folder that is a link to another drive as *ComfyUI input folder (linked to another location)*.
+- Multi-image nodes: *Used as* names the input an image reaches (e.g. `source (TextEncodeQwenImage21 · image_1)`),
+  and *Source image* lists the files in that order (`P1025544.png → image_1`) – which image is the base of an edit is up to the prompt, the
+  report does not guess it.
+
+### Added
+- Every input image is listed with its **size** (read from the file header).
+- INPUT FILES summary reads `2 × source · 1 × preview only`.
+- **`<image>.workflow.json`** next to the report: the workflow that was run, credentials redacted – opens directly
+  in ComfyUI (drag and drop). Written with `write_json` and `embed_workflow` on.
+
+### Changed
+- **Report files are named `<image>.audit.txt` / `.audit.json` / `.audit.pdf`** (before: `.txt` / `.json` / `.pdf`),
+  so they stand out next to the image and the `.workflow.json`. The counter also skips numbers used by the old names.
+- The **`.audit.txt` is complete:** every inactive node is listed by name, prompt texts are never shortened. The
+  **PDF** lists up to five inactive nodes (loaders with model files always) and shortens texts over 512 words; when
+  it shortens anything, its header says so and names the `.audit.txt`.
+- The `.json` now carries the **workflow that was run** (`comfyui_workflow`: UI workflow and API prompt), with
+  credentials redacted – the report and the graph it describes stay together, also without the PNG (needed for
+  the audit chain), with the name and SHA256 of the `.workflow.json`. Follows `embed_workflow`: off = no workflow in
+  the `.json` and no `.workflow.json`. Not in the `.txt` / `.pdf`.
+
 ## 1.4.0 – 2026-10-25
 
 ### Added
