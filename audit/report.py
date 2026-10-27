@@ -33,7 +33,7 @@ OPTIONAL_FIELDS = {"notes", "changes_outside_comfyui"}
 ROLE_NAMES = {"checkpoint": "Checkpoint", "diffusion_model": "Diffusion model", "vae": "VAE",
               "text_encoder": "Text encoder", "lora": "LoRA", "controlnet": "ControlNet", "upscaler": "Upscaler",
               "clip_vision": "CLIP vision", "ip_adapter": "IP-Adapter", "style_model": "Style model", "vlm": "VLM",
-              "matting_model": "Matting model"}
+              "matting_model": "Matting model", "segmentation_model": "Segmentation / matting model"}
 U = K.UNKNOWN_LABEL
 
 

@@ -320,7 +320,8 @@ _GUIDANCE_RE = re.compile(r"controlnet|control_net|t2i.?adapter|preprocess|canny
 _REFERENCE_RE = re.compile(r"ipadapter|ip_adapter|clip.?vision|style.?model|redux|instantid|pulid|faceid|photomaker|"
                            r"reactor|faceswap|face.?swap|infiniteyou|uno\b", re.I)
 _SOURCE_RE = re.compile(r"vae.?encode|inpaint|img2vid|i2v|image.?to.?video|imagetovideo|encode.*video|"
-                        r"reference.?latent|kontext|edit|vitmatte|trimap|composite|matte", re.I)
+                        r"reference.?latent|kontext|edit|vitmatte|trimap|composite|matte|rmbg|birefnet|inspyre|"
+                        r"remove.?b(ack)?g(round)?|background", re.I)
 _PREVIEW_RE = re.compile(r"preview|show|display|compare", re.I)
 _MASK_INPUT_RE = re.compile(r"mask", re.I)
 

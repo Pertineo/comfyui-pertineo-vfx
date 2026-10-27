@@ -3,6 +3,23 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.4.2 – 2026-10-27
+
+### Fixed
+- **Models chosen by name were missing** (e.g. RMBG: `model = INSPYRENET`, files in `models/RMBG/INSPYRENET/`):
+  the audit only recognised inputs that point to a model file. A text / choice value that is exactly the name of a
+  model folder (in any model folder ComfyUI knows, incl. `extra_model_paths.yaml`, and one level below each models
+  root) now counts as a model: its weight files are listed and hashed (role *Segmentation / matting model* for
+  RMBG, BiRefNet, BEN …) and matched against model_info by hash or file pattern. ComfyUI's own folders (loras,
+  checkpoints …) are never matched, so a value like `flux` cannot pull in a LoRA sub folder; a folder with more
+  than 10 weight files is listed but not hashed.
+- **PDF thumbnail of an image with alpha was black** where the image is transparent: it is now shown over a grey
+  checkerboard (half-transparent areas stay visible). The saved PNG / EXR keeps its alpha as before.
+- An empty manual field (e.g. *Reference images*) reads `UNKNOWN / NOT VERIFIED` instead of
+  `UNKNOWN / NOT VERIFIED – not provided` – one label, the finding "Not filled in" already says the rest.
+- An input that goes through a background-removal node is listed as *source (RMBG)* instead of
+  *source (PertineoSaveImageMetadata)*.
+
 ## 1.4.1 – 2026-10-26
 
 ### Fixed

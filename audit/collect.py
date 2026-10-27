@@ -25,7 +25,7 @@ from . import hashing
 
 SCHEMA = "pertineo-audit/1"
 UNKNOWN_INFO = "UNKNOWN / NOT VERIFIED"
-NOT_PROVIDED = "UNKNOWN / NOT VERIFIED – not provided"
+NOT_PROVIDED = UNKNOWN_INFO  # 1.4.2: one label – "not provided" repeated what UNKNOWN already says
 MODEL_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".sft", ".bin")
 MODEL_INFO_DEFAULT = "model_info.json"
 DISCLAIMER_KEY = "_disclaimer"
@@ -590,6 +590,9 @@ _FOLDER_BY_INPUT = [
 ]
 
 
+_SEGMENT_RE = re.compile(r"rmbg|birefnet|inspyre|\bben2?\b|background|segment|\bsam\d?\b|matting|matte", re.I)
+
+
 def model_role(ct, input_name):
     c, i = ct.lower(), input_name.lower()
     if "lora" in i or "lora" in c:
@@ -604,6 +607,8 @@ def model_role(ct, input_name):
         return "upscaler"
     if "style_model" in i:
         return "style_model"
+    if _SEGMENT_RE.search(c):
+        return "segmentation_model"
     if i == "ckpt_name" or "checkpoint" in c:
         return "checkpoint"
     if i == "vae_name" or ("vae" in i and "vae" in c):
@@ -713,6 +718,18 @@ def _model_refs(graph, nid, warn):
                     extra[sk] = sval if sok else snote
         yield name, val, extra
 
+    # 1.4.2: models chosen by name, where the name is a model folder (e.g. RMBG: "INSPYRENET" →
+    # models/RMBG/INSPYRENET/…). Only plain text / choice values; the folder must hold weight files.
+    if not ct.startswith(("PertineoViTMatte", "Pertineo")):
+        for name, raw in ins.items():
+            if name.lower() in _SELECTOR_INPUTS:
+                continue
+            ok, val, _note, _chain = graph.resolve(raw)
+            if not ok or not isinstance(val, str) or isinstance(raw, list) or val.lower().endswith(MODEL_EXTS):
+                continue
+            for full, shown in _folder_model_files(val):
+                yield name, shown, {"_path": full, "_folder": None, "model_folder": val}
+
     # Pertineo's own ViTMatte nodes reference a Hugging Face model folder, not a file
     if ct in ("PertineoViTMatteRefiner", "PertineoViTMatteSequence"):
         try:
@@ -730,6 +747,111 @@ def _model_refs(graph, nid, warn):
                     "_path": os.path.join(d, "model.safetensors") if d else None}
         except Exception as e:
             warn(f"ViTMatte model of {graph.label(nid)} could not be resolved ({type(e).__name__}: {e})")
+
+
+_FOLDER_NAME_RE = re.compile(r"^[\w.+-][\w .+-]{1,80}$")
+# ComfyUI's own file-model folders: their sub folders sort files (loras/flux, checkpoints/SDXL), they are not
+# models chosen by name – never matched, so a value like "flux" cannot pull in a whole LoRA folder
+_STANDARD_FOLDERS = {"checkpoints", "loras", "vae", "vae_approx", "text_encoders", "clip", "clip_vision", "unet",
+                     "diffusion_models", "controlnet", "t2i_adapter", "upscale_models", "latent_upscale_models",
+                     "embeddings", "hypernetworks", "style_models", "gligen", "photomaker", "diffusers",
+                     "model_patches", "audio_encoders", "configs", "classifiers", "custom_nodes", "ipadapter",
+                     "llm", "vitmatte"}
+_SELECTOR_INPUTS = {"type", "weight_dtype", "dtype", "device", "sampler_name", "scheduler", "precision",
+                    "attention", "upscale_method", "background", "format", "mode", "method"}
+_FOLDER_MAX_FILES = 10
+
+
+def _model_roots():
+    """(root folder, label) of every model folder ComfyUI knows (incl. extra_model_paths.yaml) and models_dir."""
+    try:
+        import folder_paths
+    except Exception:
+        return []
+    roots, seen = [], set()
+    md = getattr(folder_paths, "models_dir", None)
+    cands = [(md, "")] if md else []
+    for key, entry in (getattr(folder_paths, "folder_names_and_paths", {}) or {}).items():
+        if key.lower() in _STANDARD_FOLDERS:
+            continue
+        paths = entry[0] if isinstance(entry, (list, tuple)) and entry and isinstance(entry[0], (list, tuple, set)) \
+            else entry
+        for pth in paths or []:
+            if isinstance(pth, str):
+                cands.append((pth, os.path.basename(pth.rstrip(os.sep))))
+    # the parents of the standard folders are models roots too (e.g. /mnt/…/ComfyUI_models from
+    # extra_model_paths.yaml) – searched one level deep, standard folders skipped
+    for key in ("checkpoints", "loras", "vae", "diffusion_models", "text_encoders"):
+        try:
+            for pth in folder_paths.get_folder_paths(key):
+                cands.append((os.path.dirname(os.path.realpath(pth).rstrip(os.sep)), ""))
+        except Exception:
+            pass
+    for pth, label in cands:
+        real = os.path.realpath(pth)
+        if os.path.isdir(real) and real not in seen:
+            seen.add(real)
+            roots.append((real, label))
+    return roots
+
+
+_FOLDER_INDEX = {"time": 0.0, "index": {}}
+
+
+def _folder_index():
+    """lower-case folder name -> [(path, shown name)] for every folder directly in a model folder and one level
+    below each models root. Built once and reused for a few seconds (one audit run)."""
+    import time
+
+    if time.time() - _FOLDER_INDEX["time"] < 10:
+        return _FOLDER_INDEX["index"]
+    index = {}
+    for root, label in _model_roots():
+        try:
+            subdirs = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
+        except OSError:
+            continue
+        for d in subdirs:
+            if not label and d.lower() in _STANDARD_FOLDERS:
+                continue
+            p = os.path.join(root, d)
+            index.setdefault(d.lower(), []).append((p, f"{label}/{d}" if label else d))
+            if not label:  # a models root: one level deeper (models/RMBG/INSPYRENET)
+                try:
+                    for d2 in os.listdir(p):
+                        p2 = os.path.join(p, d2)
+                        if os.path.isdir(p2):
+                            index.setdefault(d2.lower(), []).append((p2, f"{d}/{d2}"))
+                except OSError:
+                    pass
+    _FOLDER_INDEX.update(time=time.time(), index=index)
+    return index
+
+
+def _folder_model_files(value):
+    """[(full path, shown name)] of the weight files in a model folder named `value` – searched directly in each
+    model folder and one level below (models/RMBG/<value>). Empty if no such folder or no weight files."""
+    v = str(value).strip()
+    if not _FOLDER_NAME_RE.match(v) or v.lower() in ("none", "auto", "default", "true", "false"):
+        return []
+    found, seen = [], set()
+    for p, shown in _folder_index().get(v.lower(), []):
+        real = os.path.realpath(p)
+        if real in seen:
+            continue
+        seen.add(real)
+        for dirpath, dirs, files in os.walk(real):
+            if dirpath[len(real):].count(os.sep) >= 2:
+                dirs[:] = []
+            for f in sorted(files):
+                if f.lower().endswith(MODEL_EXTS):
+                    full = os.path.join(dirpath, f)
+                    rel = os.path.relpath(full, real).replace(os.sep, "/")
+                    found.append((full, f"{shown}/{rel}"))
+    if len(found) > _FOLDER_MAX_FILES:  # a collection, not one model – do not hash it
+        first = _folder_index().get(v.lower(), [(None, v)])[0][1]
+        return [(None, f"{first} ({len(found)} weight files – not hashed)")]
+    return found
 
 
 # Column order of new tables (what people read first comes first); the reader accepts any order.
@@ -1120,8 +1242,11 @@ def models(graph, executed, compute_hashes, info_entries, show, warn, self_id=No
             role = "matting_model" if ct.startswith("PertineoViTMatte") else model_role(ct, input_name)
             entry = {"role": role, "node_id": nid, "node_type": ct, "input": input_name}
             explicit = extra.pop("_path", "missing")
+            folder_override = extra.pop("_folder", "vitmatte")
+            if extra.get("model_folder"):
+                role = "segmentation_model" if role.startswith("model (") else role
             if explicit != "missing":
-                full, folder = explicit, "vitmatte"
+                full, folder = explicit, folder_override
                 if full is None:
                     warn(f"{graph.label(nid)}: ViTMatte model folder not found (not downloaded yet?)")
             else:
@@ -1138,6 +1263,8 @@ def models(graph, executed, compute_hashes, info_entries, show, warn, self_id=No
             if full is None and explicit == "missing":
                 entry["sha256"] = "not computed – file not found in the model folders"
                 warn(f"{graph.label(nid)}: model file not found: {show.path(name)}")
+            elif full is None and extra.get("model_folder"):
+                entry["sha256"] = "not computed – model folder holds more than one model"
             elif full and compute_hashes:
                 try:
                     sha, cached = hashing.sha256_file(full, label=os.path.basename(name))

@@ -36,7 +36,7 @@ _IMAGE_EXT_RE = re.compile(r"\.(png|jpe?g|webp|tiff?|exr|bmp|gif)$", re.I)
 
 _EMBED_NOTE_SHOWN = False
 _MANUAL_TIP = (" Write 'none' if there is nothing to declare. Empty = the report shows 'UNKNOWN / NOT "
-               "VERIFIED – not provided' (notes and planned work: optional, empty stays empty).")
+               "VERIFIED' (notes and planned work: optional, empty stays empty).")
 
 
 # --------------------------------------------------------------------------
@@ -262,6 +262,24 @@ def _reserve(folder, prefix, digits, counter, ext):
         counter += 1
 
 
+def _pdf_thumbnail(img):
+    """HxWx3 uint8 for the PDF. An image with alpha is shown over a grey checkerboard (as in Nuke /
+    Photoshop), so transparent areas read as transparent instead of black."""
+    a = np.clip(np.asarray(img, dtype=np.float32), 0.0, 1.0)
+    if a.ndim == 2:
+        a = a[..., None]
+    alpha = a[..., 3:4] if a.shape[-1] >= 4 else None
+    rgb = a[..., :3] if a.shape[-1] >= 3 else np.repeat(a[..., :1], 3, axis=-1)
+    if alpha is not None:
+        h, w = rgb.shape[:2]
+        tile = max(8, min(h, w) // 32)  # about 32 squares across the short side
+        yy, xx = np.mgrid[0:h, 0:w]
+        board = np.where(((yy // tile) + (xx // tile)) % 2 == 0, 0.80, 0.62).astype(np.float32)[..., None]
+        # ComfyUI images are straight (not premultiplied) alpha
+        rgb = rgb * alpha + board * (1.0 - alpha)
+    return (rgb * 255.0 + 0.5).astype(np.uint8)
+
+
 def _display_folder(folder, full):
     if full:
         return folder
@@ -449,9 +467,7 @@ class PertineoSaveImageMetadata:
             if write_pdf:
                 p = os.path.join(folder, base + ".audit.pdf")
                 try:
-                    thumb = (np.clip(img[..., :3], 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-                    if thumb.shape[-1] == 1:
-                        thumb = np.repeat(thumb, 3, axis=-1)
+                    thumb = _pdf_thumbnail(img)
                     author = ((per_json or {}).get("manual") or {}).get("author")
                     bad = write_pdf_file(p, pdf_txt, title=f"Audit report {base}", thumbnail=thumb, author=author)
                     if bad:
