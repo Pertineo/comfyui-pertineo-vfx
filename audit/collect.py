@@ -1726,6 +1726,16 @@ def latent_info(graph, nid, source_link=None):
     sampler_id = nid
     ins = graph.inputs(nid)
     v = ins.get("latent_image", ins.get("latent"))
+    if not is_link(v):
+        img = next((k for k in ("image", "upscaled_image", "pixels", "images") if is_link(ins.get(k))), None)
+        if img:
+            # 1.4.3: tiled refiners / upscalers (e.g. Ultimate SD Upscale) sample tiles of an image – there is
+            # no latent input; record the size of the image they produced in this run
+            info = {"note": "image-based – samples tiles of the input image", "image_based": True}
+            size = image_info(graph.runtime_object(nid, 0))
+            if size:
+                info["result_width"], info["result_height"] = size["width"], size["height"]
+            return info
     for _ in range(8):
         if not is_link(v):
             return {"note": "not connected"}

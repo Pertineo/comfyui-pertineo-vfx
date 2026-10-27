@@ -44,13 +44,19 @@ _MANUAL_TIP = (" Write 'none' if there is nothing to declare. Empty = the report
 # --------------------------------------------------------------------------
 class PertineoCollectMetadata:
     CATEGORY = CATEGORY
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("metadata_text", "metadata_json")
+    # 1.4.3: image is appended last – existing links to metadata_text / metadata_json keep their slots
+    RETURN_TYPES = ("STRING", "STRING", "IMAGE")
+    RETURN_NAMES = ("metadata_text", "metadata_json", "image")
+    OUTPUT_TOOLTIPS = ("The readable report.", "The machine-readable report (JSON).",
+                       "output_image, passed through unchanged – connect it to Save Image + Metadata so one cable "
+                       "carries image and metadata. Empty when output_image is not connected. Collect Metadata "
+                       "runs on every queue, so put it at the very end (directly before Save): nodes after it "
+                       "run again on every queue as well.")
     FUNCTION = "run"
     DESCRIPTION = ("Collects an audit record of the current run: environment, all model files with SHA256 / "
                    "AutoV2 hash, source and license from your model_info file, custom node packages and "
                    "versions, API nodes, sampler settings, prompts and resolutions, plus manual audit fields. "
-                   "Outputs a readable text and a JSON with the same content. Never stops the generation – "
+                   "Outputs a readable text and a JSON with the same content, and passes output_image through (image). Never stops the generation – "
                    "problems are listed as warnings in the report.")
 
     @classmethod
@@ -96,7 +102,8 @@ class PertineoCollectMetadata:
             "optional": {
                 "source_image": ("IMAGE", {"tooltip": "Optional: the source / input image, for the source resolution."}),
                 "output_image": ("IMAGE", {"tooltip": "Optional: the final image (batch), for the final resolution "
-                                                      "and, with fps, frame count and duration."}),
+                                                      "and, with fps, frame count and duration. Passed through "
+                                                      "unchanged at the image output."}),
                 "fps": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 240.0, "step": 0.001,
                     "tooltip": "Frame rate for video output (e.g. 24, 25, 23.976). 0 = still image(s), no video "
                                "section in the report."}),
@@ -167,7 +174,7 @@ class PertineoCollectMetadata:
             text = f"{HEADER}\nReport rendering failed ({type(e).__name__}). See metadata_json.\n"
         n_models = len(data.get("models") or [])
         print(f"{LOG} Audit: {n_models} model file(s), {len(data.get('warnings') or [])} warning(s)")
-        return (text, json.dumps(data, indent=2, ensure_ascii=False, default=str))
+        return (text, json.dumps(data, indent=2, ensure_ascii=False, default=str), output_image)
 
 
 # --------------------------------------------------------------------------

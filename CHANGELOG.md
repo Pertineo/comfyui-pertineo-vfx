@@ -3,6 +3,28 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.4.3 – 2026-10-27
+
+### Added
+- **Collect Metadata passes the image through:** new output **`image`** (appended last – existing links to
+  `metadata_text` / `metadata_json` are unchanged) carries `output_image` unchanged. Connect it to Save Image +
+  Metadata, so one node feeds both image and metadata and the image does not have to be wired twice. Empty when
+  `output_image` is not connected. Collect Metadata runs on every queue – put it directly before Save, since nodes
+  after it run again on every queue as well.
+
+### Changed
+- Input use follows an image through Collect Metadata's `image` output, so an input that reaches Save only via the
+  pass-through is still listed as *source*.
+
+### Fixed
+- **Input use through crop nodes with a preview:** an output node that also passes the image on (e.g. PixaromaCrop)
+  is now followed instead of ending the trace, so the report names the node that really uses the image (e.g.
+  `TextEncodeQwenImage21`). Uncrop / stitch nodes that paste a result back into the image count as *source*.
+- **Workflow type of edit workflows:** an empty latent with an image encoded into the conditioning (Qwen Image Edit,
+  Kontext, ReferenceLatent) is now reported as *image edit (image in the conditioning)* instead of *text-to-image*.
+- **Ultimate SD Upscale and similar tiled samplers:** no longer reported as "Latent: not connected". The report now
+  says *image-based (samples tiles of the input image)* with the size of the result from this run.
+
 ## 1.4.2 – 2026-10-27
 
 ### Fixed

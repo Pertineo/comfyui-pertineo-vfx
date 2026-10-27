@@ -453,6 +453,10 @@ def render(data, short=False):
                 extra += f"  (latent {lat['latent_width']} x {lat['latent_height']} × VAE factor " \
                          f"{_fmt(lat.get('vae_factor'))}, read from this run)"
             L += _kv("Latent", f"{lat['width']} x {lat['height']}{extra}", indent=INDENT * 2)
+        elif lat.get("image_based"):  # 1.4.3: e.g. Ultimate SD Upscale – works on the image, has no latent
+            res_sz = f", result {lat['result_width']} x {lat['result_height']}" if "result_width" in lat else ""
+            L += _kv("Latent", f"none – image-based (samples tiles of the input image){res_sz}",
+                     indent=INDENT * 2)
         elif "latent_width" in lat:
             L += _kv("Latent", f"latent {lat['latent_width']} x {lat['latent_height']} – {U} – VAE scale factor "
                                f"not known, pixel size not recorded", indent=INDENT * 2)
@@ -483,6 +487,9 @@ def render(data, short=False):
     for g in res.get("generation") or []:
         if "width" in g:
             gens.append(f"{g['width']} x {g['height']}" + ("  (encoded source image)" if g.get("same_as") else ""))
+        elif g.get("image_based"):
+            gens.append(f"{g['result_width']} x {g['result_height']} (image-based, tiled)" if "result_width" in g
+                        else "image-based (tiled), size not recorded")
         elif "latent_width" in g:
             gens.append(f"{U} – latent {g['latent_width']} x {g['latent_height']}, VAE scale factor not known")
         else:

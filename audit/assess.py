@@ -321,7 +321,7 @@ _REFERENCE_RE = re.compile(r"ipadapter|ip_adapter|clip.?vision|style.?model|redu
                            r"reactor|faceswap|face.?swap|infiniteyou|uno\b", re.I)
 _SOURCE_RE = re.compile(r"vae.?encode|inpaint|img2vid|i2v|image.?to.?video|imagetovideo|encode.*video|"
                         r"reference.?latent|kontext|edit|vitmatte|trimap|composite|matte|rmbg|birefnet|inspyre|"
-                        r"remove.?b(ack)?g(round)?|background", re.I)
+                        r"remove.?b(ack)?g(round)?|background|uncrop|stitch", re.I)  # uncrop / stitch: pasted back
 _PREVIEW_RE = re.compile(r"preview|show|display|compare", re.I)
 _MASK_INPUT_RE = re.compile(r"mask", re.I)
 
@@ -383,6 +383,7 @@ def input_use(graph, executed, nid):
     from .collect import is_sampler
 
     found = {}
+    fallback = {}  # output nodes that pass the image on – used as "source" only if nothing further decides
     seen = set()
     stack = [(c, name, idx, 0, graph.output_name(nid, idx)) for c, name, idx in _edges_from(graph, executed, nid)
              if not _scalar_output(graph, nid, idx)]
@@ -395,7 +396,13 @@ def input_use(graph, executed, nid):
         ins = graph.inputs(c)
         use = None
         if ct.startswith("PertineoCollectMetadata"):
-            continue  # source_image / output_image of the audit node only measure the resolution
+            # source_image only measures the resolution; output_image is passed through at the image output
+            # (1.4.3) – follow it to whatever takes that output (e.g. Save Image + Metadata)
+            if name == "output_image":
+                for c2, n2, i2 in _edges_from(graph, executed, c):
+                    if graph.output_name(c, i2) == "image":
+                        stack.append((c2, n2, i2, depth + 1, "image"))
+            continue
         if str(out_name).lower() == "mask" or _MASK_INPUT_RE.search(name):
             use = "guidance"
         elif _is_generator(graph, c):
@@ -408,6 +415,11 @@ def input_use(graph, executed, nid):
             use = "source"
         elif "clip" in ins and any(k in ins for k in ("text", "prompt")):
             use = "source"  # text encoder of an edit model that reads the image (e.g. Qwen Image Edit)
+        elif graph.is_output_node(ct) and not _PREVIEW_RE.search(ct) and any(
+                not _scalar_output(graph, c, i2) for _c2, _n2, i2 in _edges_from(graph, executed, c)):
+            # 1.4.3: an output node that also passes the image on (e.g. a crop node with its own preview) is a
+            # step on the way, not the use – follow it; it only counts as source if nothing further decides
+            fallback.setdefault(graph.label(c), None)
         elif graph.is_output_node(ct):
             use = "preview only" if _PREVIEW_RE.search(ct) else "source"
         elif is_sampler(graph, c):
@@ -433,6 +445,8 @@ def input_use(graph, executed, nid):
         for c2, n2, i2 in nxt:
             if not _scalar_output(graph, c, i2):
                 stack.append((c2, n2, i2, depth + 1, graph.output_name(c, i2)))
+    if fallback and not any(u in found for u in ("source", "guidance", "reference", "prompt reference")):
+        found.setdefault("source", []).extend(lab for lab in fallback if lab not in found.get("source", []))
     if len(found) > 1:
         found.pop("use not determined", None)
         if any(u in found for u in ("source", "guidance", "reference", "prompt reference")):
@@ -810,6 +824,32 @@ _CAPABILITIES = [
 ]
 
 
+_COND_IMAGE_SKIP_RE = re.compile(r"controlnet|ipadapter|stylemodel|clipvision|redux|instantid|pulid", re.I)
+_COND_KEYS = ("positive", "negative", "conditioning", "conditioning_1", "conditioning_2", "conditioning_to",
+              "conditioning_from", "cond", "guider")
+
+
+def _conditioning_has_image(graph, root, depth=0, seen=None):
+    """True when an image is encoded into the conditioning itself (edit models such as Qwen Image Edit /
+    TextEncodeQwenImage*, Kontext, ReferenceLatent) – the sampler then edits that image even though its latent
+    is empty. ControlNet / IP-Adapter images are guidance, not this, and are reported separately."""
+    from .collect import is_link
+    seen = set() if seen is None else seen
+    if not is_link(root) or depth > 12 or root[0] in seen or root[0] not in graph.nodes:
+        return False
+    nid = root[0]
+    seen.add(nid)
+    ct = graph.ctype(nid)
+    ins = graph.inputs(nid)
+    if not _COND_IMAGE_SKIP_RE.search(ct):
+        if re.search(r"reference.?latent|kontext", ct, re.I) and is_link(ins.get("latent")):
+            return True
+        if "clip" in ins and any(is_link(v) and _IMAGE_IN_RE.match(str(k).split(".")[-1].replace("image_", "image"))
+                                 for k, v in ins.items()):
+            return True
+    return any(_conditioning_has_image(graph, ins.get(k), depth + 1, seen) for k in _COND_KEYS)
+
+
 def classify(graph, executed, models, samplers, api_nodes):
     types = {graph.ctype(n) for n in executed}
     text = " ".join(types).lower() + " " + " ".join(m["file"].split("/")[-1].lower() for m in models)
@@ -820,7 +860,13 @@ def classify(graph, executed, models, samplers, api_nodes):
     for s in samplers:
         lat = (s.get("latent") or {})
         src = (lat.get("from") or "").lower()
-        if "empty" in src:
+        sins = graph.inputs(s.get("node_id"))
+        if lat.get("image_based"):
+            pass  # tiled refiners / upscalers (e.g. Ultimate SD Upscale) – covered by the rules below
+        elif any(_conditioning_has_image(graph, sins.get(k)) for k in ("positive", "negative", "guider")):
+            # 1.4.3: an empty latent with the image in the conditioning is an edit, not text-to-image
+            found.append("image-conditioned video" if is_video else "image edit (image in the conditioning)")
+        elif "empty" in src:
             found.append("text-to-video" if is_video else "text-to-image")
         elif lat.get("same_as") or "vaeencode" in src or "encoded" in (lat.get("note") or ""):
             found.append("image/video-to-video" if is_video else "image-to-image")
