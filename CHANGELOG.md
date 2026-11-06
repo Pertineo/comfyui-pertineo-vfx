@@ -3,6 +3,106 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.5.0 – 2026-11-04
+
+### Added
+- **Pertineo Save Media:** saves an image sequence, a mask sequence and videos in one go, all with the same name
+  and version. The settings are grouped by name – `seq_…` (sequences), `mask_…`, `video_…`, `meta_…` (side files);
+  rarely changed ones are marked *advanced* (hidden by default in frontends that support it). Folders are created automatically – the sequence folder has the name of the video and sits right
+  next to it (`shot010_comp_v003.mov` + `shot010_comp_v003/shot010_comp_v003.1001.png`), the mask goes to
+  `shot010_comp_v003_mask/` (and `_mask.mov`).
+  - Sequences: PNG 8/16 bit (default PNG 16 bit), TIFF 8/16/32-bit float, EXR half / float, JPG. Lossless
+    compression *balanced* / *fast* / *small*. Frames are written in parallel on several cores.
+  - Video through ffmpeg: *preview* (H.264 8 bit), *review* (H.265 10 bit), ProRes 422 HQ, ProRes 4444 (keeps the
+    alpha of RGBA images). 16-bit frames are streamed to ffmpeg, so 10-bit codecs get real 10-bit values; Rec.709
+    tags; NVENC first where available, then the software encoder. The mask can be written as a video as well.
+  - Optional `audio` input: muxed into the image video (24-bit PCM in .mov, AAC 320 kbit/s in .mp4), cut or padded
+    with silence to the exact video length; mask videos stay silent. `video_audio` *always* writes a silent stereo
+    track (48 kHz) when nothing is connected – a base track for editing.
+  - Alpha, separately for sequence and video: `seq_alpha` = *straight* (default – full RGB + separate
+    alpha), *premultiplied* (EXR in linear light) or *auto* (EXR premultiplied, PNG / TIFF straight); `video_alpha` = *straight* / *premultiplied* (ProRes 4444); `seq_input_premultiplied` for RGB that is already premultiplied; `seq_alpha_channel` = RGB or RGBA:
+    *from mask* (default – the connected mask becomes the alpha of the image sequence and ProRes 4444, white =
+    opaque, not inverted; without a mask like *from image*), *from image* (RGBA stays RGBA) or *none* (always RGB). `video_of` *image + mask (2 videos)* writes
+    the mask as a separate grey video, independent of the alpha.
+  - `preview`: a player on the node (small H.264 copy in ComfyUI's temp folder, max. 540 px high, with audio – shown
+    the same way as ComfyUI's Save Video), a still frame, or off.
+  - Versions: *next free* (one more than the highest version of this name in the folder and its date folders,
+    counting every output, so all outputs of a run share the number), *fixed*, *off*; `output_name` input from Output Name.
+  - Folder, name (`filename` template with `{name}` from a loader), version and date folder (YYYY-MM-DD, YYYYMMDD,
+    YYMMDD) are set in **Output Name**; without it Save Media writes `<output>/render_v###`.
+  - Template workflow `io_save_media_with_output_name` (Browse Templates): loader, Output Name and Save Media
+    ready-wired.
+  - `<name>.sha256` with the SHA256 of every frame and video (`sha256sum -c` compatible), `<name>.workflow.json`.
+  - `meta_embed_workflow`: workflow and prompt in the video's metadata (mov / mp4, credentials redacted, like Video
+    Helper Suite), any size.
+  - With Collect Metadata connected: one `.audit.txt` / `.audit.json` / `.audit.pdf` for the whole output (not one
+    per frame); the report lists every output and the checksum file, the .json carries the full SHA256 list.
+  - `seq_clamp` off keeps values above 1 in EXR and TIFF 32-bit float (HDR); `seq_exr_to_linear` as in Save Image + Metadata.
+- **Pertineo Output Name:** folder, name and version in one place. Shows the resulting file names on the node; to check
+  them before rendering, run only this node (*Queue Selected Output Nodes*). The `preview` output carries the text.
+  A version already in the name is counted up in place (`version_in_name`: `sh010_comp_v01` → `sh010_comp_v02`,
+  digits and spelling kept); *append* adds `_v001` instead. A `suffix` field adds e.g. `upscaled`, `edit`, `48fps`
+  (`version_mode` *off* = no version). Names are made pipeline-safe (`ä` → `ae`, `ß` → `ss`,
+  accents dropped, spaces / brackets / other characters → `_`: `clip 002 (1)_edit` → `clip_002_1_edit`). One Output Name can feed several
+  Save Media, which then share name and version; a Save Media that writes only the mask names its companion files
+  (.sha256, .workflow.json, .audit.*) after the mask.
+- **Pertineo Load Video:** MOV / MP4 / MXF / MKV … through ffmpeg in full bit depth (10 / 12 bit keep their
+  precision), ProRes 4444 alpha as mask, exact frame range by frame index (`first_frame`, `frame_count`,
+  `every_nth`), color matrix and range from the file (untagged HD = Rec.709), no scaling. Video from the input folder
+  (with upload) or any `path`. Outputs `frame_count`, `fps`, `folder`, `folder_root`, `name`, width, height and `audio` – the sound of exactly
+  the loaded range (original sample rate / channels, float; silence of the same length without an audio track).
+  `frame_count` = output frames, also with `every_nth`. Frames go straight into one batch.
+- **Pertineo Fit Frames to Model:** brings an image batch, its mask and audio to a valid model length (LTX 8n+1,
+  Wan 4n+1, MiniMax H3 17n+5, custom) – cut at the end / start, or extended by hold last frame, hold first frame,
+  bounce or loop (audio: silence, looped with loop). Outputs `length`, `original_length`, `difference`.
+- **Pertineo Compare** (new category *Pertineo/Review*): A/B comparison rendered as an image batch – side by side,
+  stacked, wipe, difference (heatmap / colour, gain), matte check (red / green overlay, checkerboard cut-out, matte
+  only), with labels and frame-number burn-in. Optional `matte` input; shorter input holds, B is fitted to A.
+- **Pertineo Preview Frame** (*Pertineo/Review*): one frame of an image / mask batch large on the node – middle,
+  first, last or by index – as image, mask, side by side, red overlay or checkerboard cut-out, with frame number.
+  Its outputs carry only that one frame – a side branch for viewing, not part of the chain.
+- **Loader + Info nodes** (new category *Pertineo/Loaders*): Load Checkpoint / Diffusion Model / VAE / Text Encoder /
+  Dual Text Encoder / ControlNet / Upscaler + Info. Each loads with ComfyUI's own loader – inputs and loading come
+  from the core node at run time, so new ComfyUI options appear without an update – and outputs `name`,
+  `base_model`, `trigger_words`, `recommended`, `license` and `info` from the model_info file.
+- **Pertineo Load Image:** one image in full precision (16-bit PNG / TIFF, EXR) with upload or from any `path`;
+  `folder`, `folder_root`, `name`, width and height outputs; mask from alpha (inverted like Load Image, or as
+  stored) or a color channel.
+- **Load Image Sequence:** new outputs **`folder_root`** and **`name`** after `folder` (the first five outputs are
+  unchanged, so 1.4.x links keep working). `name` = the sequence name without frame number and extension, for
+  Output Name. `folder_root` = the folder *above* the sequence folder (and above a date folder like `2026-11-06`) –
+  connect it to Output Name's `output_folder` and the next version is written next to the loaded one
+  (`renders/sh010_comp_v02/`) instead of inside it (`renders/sh010_comp_v01/sh010_comp_v02/`). It only steps out
+  of the frame folder when that folder is named like the sequence or carries a version (`sh010_comp_v01/`).
+  Load Video and Load Image have the same `folder` / `folder_root` outputs (the file's folder; above it only for a
+  date folder). Files in ComfyUI's input folder (uploads) give the ComfyUI output folder as `folder_root` – renders
+  never land in the input folder.
+
+### Changed
+- **Fewer fields at first sight (Nodes 2.0 view):** rarely changed settings are marked *advanced* and sit behind
+  *Show advanced inputs* – e.g. `missing_frames`, `every_nth`, `frame_padding`, the custom model steps, ViTMatte
+  `overlap` / `flip_tta` / `clamp_known` / `quantize_trimap` / `custom_model`, Trimap inversions, `model_info_file`
+  / `lookup_by_hash` on the Loader + Info nodes, Collect Metadata `compute_model_hashes` / `include_full_paths` /
+  `include_author`. Only the display changes: values, positions and old workflows stay the same; the classic view
+  still shows every field.
+- **Load Image Sequence: labelled preview** – the node preview shows which frame it is and which range was loaded
+  (`1122 (middle) · loaded 1001-1243 (243 frames)`); pasting one frame of a sequence loads the whole sequence.
+  New optional `preview_type` (last, so 1.4.x workflows are unchanged): *still frame* (default) or *video* – a
+  player with a small H.264 copy of the loaded range (max. 540 px high, temp folder) at `preview_fps`.
+- **`exr_to_srgb` tooltips** (Load Image Sequence, Load Image, ViTMatte Tiled (Sequence)): state that only .exr
+  files are affected, and what to do with EXRs that were saved with sRGB values (they look flat – turn it off).
+- **Save Image + Metadata: optional `output_name` input** (appended last – existing workflows unchanged). With
+  Pertineo Output Name connected, folder, name, version and date folder come from there: one image ->
+  `<name>_v003.png`, a batch -> `<name>_v003_01.png`, `_02` …; an existing name is never overwritten (clear error).
+  Output Name's *next free* also counts these batch files.
+- **Model Info (…) nodes are deprecated:** the Loader + Info nodes replace them. They are hidden in the node library;
+  existing workflows keep working (ComfyUI's setting for deprecated nodes shows them again).
+- **LoRA Loader + Info** moved to the category *Pertineo/Loaders* (category only – workflows are unchanged).
+- **Save Matte Sequence writes frames in parallel** on several cores and prints one summary line instead of one
+  line per frame. Files and names are unchanged.
+- **Load Image Sequence needs half the RAM while loading:** frames go straight into one batch instead of a list that
+  was copied into the batch at the end. Output unchanged.
+
 ## 1.4.3 – 2026-10-27
 
 ### Added

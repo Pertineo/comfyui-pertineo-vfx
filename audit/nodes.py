@@ -84,18 +84,18 @@ class PertineoCollectMetadata:
                     "into a workflow is listed there as an input with its hash.",
                     "PLANNED WORK OUTSIDE COMFYUI: e.g. comp in Nuke – or 'none'"),
                 "notes": text("Anything else worth recording.", "NOTES"),
-                "compute_model_hashes": ("BOOLEAN", {"default": True,
+                "compute_model_hashes": ("BOOLEAN", {"advanced": True, "default": True,
                     "tooltip": "Compute SHA256 and AutoV2 of every model file. Large files take a while the first "
                                "time; results are cached (path + size + modification time) in "
                                "<ComfyUI user dir>/pertineo_vfx/model_hash_cache.json."}),
-                "model_info_file": ("STRING", {"default": "",
+                "model_info_file": ("STRING", {"advanced": True, "default": "",
                     "placeholder": "empty = <ComfyUI user dir>/pertineo_vfx/model_info.ods / .xlsx / .csv / .json",
                     "tooltip": "Spreadsheet (.ods / .xlsx / .csv, e.g. LibreOffice Calc) or .json file you maintain with source, "
                                "license, base model, trigger words … per model, keyed by SHA256 or file name (see "
                                "model_info.example.ods). Empty = <ComfyUI user dir>/pertineo_vfx/model_info.ods, "
                                ".xlsx, .csv or .json – an empty model_info.csv is created there if none "
                                "exists. Relative paths are relative to that folder. Missing entries are UNKNOWN / NOT VERIFIED."}),
-                "include_full_paths": ("BOOLEAN", {"default": False,
+                "include_full_paths": ("BOOLEAN", {"advanced": True, "default": False,
                     "tooltip": "Off (recommended for sharing): only file names and sub folders relative to the "
                                "model folder appear in the report. On: absolute local paths are included."}),
             },
@@ -112,7 +112,7 @@ class PertineoCollectMetadata:
                                "include_author is on."}),
                 "company": ("STRING", {"default": "", "placeholder": "COMPANY: optional, e.g. studio",
                     "tooltip": "Optional company or studio, shown in brackets after the author."}),
-                "include_author": ("BOOLEAN", {"default": True,
+                "include_author": ("BOOLEAN", {"advanced": True, "default": True,
                     "tooltip": "On: author and company appear in the .txt and .json. Off: both are left out "
                                "of the report (they stay in the node). Note: an embedded workflow still contains "
                                "every widget value – turn off embed_workflow on the save node as well if the name "
@@ -269,6 +269,19 @@ def _reserve(folder, prefix, digits, counter, ext):
         counter += 1
 
 
+def _reserve_named(folder, base, ext):
+    """With Pertineo Output Name: exactly this name, never overwritten (a clear error instead)."""
+    path = os.path.join(folder, base + ext)
+    clash = [base + e for e in ALL_EXTS if os.path.exists(os.path.join(folder, base + e))]
+    if not clash:
+        try:
+            return base, path, os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            clash = [base + ext]
+    raise ValueError(f"{LOG} Save Image + Metadata: {', '.join(clash)} already exists in {folder}. Use version_mode "
+                     f"'next free' or another version in Pertineo Output Name.")
+
+
 def _pdf_thumbnail(img):
     """HxWx3 uint8 for the PDF. An image with alpha is shown over a grey checkerboard (as in Nuke /
     Photoshop), so transparent areas read as transparent instead of black."""
@@ -357,7 +370,7 @@ class PertineoSaveImageMetadata:
                     "tooltip": "File name before the counter: <prefix>_001.png. Can be linked (e.g. from a "
                                "file name). A trailing image extension is removed; 'sub/name' writes into a "
                                "sub folder."}),
-                "counter_digits": ("INT", {"default": 3, "min": 1, "max": 8,
+                "counter_digits": ("INT", {"advanced": True, "default": 3, "min": 1, "max": 8,
                     "tooltip": "Digits of the counter (3 = _001)."}),
                 "format": (FORMATS, {
                     "tooltip": "PNG 8 bit (like Save Image), PNG 16 bit, or EXR 32-bit float. EXR values are "
@@ -383,14 +396,27 @@ class PertineoSaveImageMetadata:
                                "the image – long lists are shortened (the header says so), the .audit.txt has them "
                                "in full. Uses a standard PDF font – characters outside Western European scripts "
                                "(e.g. Chinese) are shown as '?' with a note; the .audit.txt / .audit.json keep them."}),
+                "output_name": ("PERTINEO_OUTPUT_NAME", {
+                    "tooltip": "From Pertineo Output Name (1.5.0): folder, name, version and date folder come from "
+                               "there and output_folder / filename_prefix / counter_digits are ignored. One image -> "
+                               "<name>_v003.png, a batch -> <name>_v003_01.png, _02 … Not connected = as before "
+                               "(<prefix>_001.png counter)."}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
     def run(self, images, output_folder, filename_prefix, counter_digits, format, embed_workflow, write_txt,
-            write_json, metadata_text=None, metadata_json=None, write_pdf=False, prompt=None,
+            write_json, metadata_text=None, metadata_json=None, write_pdf=False, output_name=None, prompt=None,
             extra_pnginfo=None):
-        folder, prefix = _resolve_output(output_folder, filename_prefix)
+        named = None
+        if isinstance(output_name, dict):  # 1.5.0: name and version from Pertineo Output Name
+            from ..image_io import media as MEDIA
+            plan = MEDIA.plan_paths(output_name["root"], output_name["date_folder"], output_name["full"],
+                                    now=output_name.get("now"))
+            folder, prefix, named = plan["folder"], plan["base"], plan["base"]
+            print(f"{LOG} Save Image + Metadata: {named} ({output_name.get('note')}) -> {folder}")
+        else:
+            folder, prefix = _resolve_output(output_folder, filename_prefix)
         os.makedirs(folder, exist_ok=True)
         ext = ext_for(format)
 
@@ -417,7 +443,11 @@ class PertineoSaveImageMetadata:
         for i in range(n):
             img = images[i].detach().cpu().numpy()
             h, w = img.shape[0], img.shape[1]
-            base, path, fd, counter = _reserve(folder, prefix, counter_digits, counter, ext)
+            if named is not None:
+                digits = max(2, len(str(n)))
+                base, path, fd = _reserve_named(folder, named if n == 1 else f"{named}_{i + 1:0{digits}d}", ext)
+            else:
+                base, path, fd, counter = _reserve(folder, prefix, counter_digits, counter, ext)
             saved_at = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
             file_line = _file_section(base + ext, i, n, w, h, format, folder_disp, saved_at)
             file_info = {"name": base + ext, "basename": base, "batch_index": i, "batch_size": n,
@@ -605,7 +635,7 @@ def info_outputs(folder, rel_name, model_info_file, lookup_by_hash, label):
 
 
 class PertineoLoraLoaderInfo:
-    CATEGORY = CATEGORY
+    CATEGORY = "Pertineo/Loaders"  # 1.5.0: next to the other Loader + Info nodes (category only – workflows unchanged)
     RETURN_TYPES = ("MODEL", "CLIP", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("model", "clip", "trigger_words", "base_model", "info")
     FUNCTION = "run"
@@ -631,11 +661,11 @@ class PertineoLoraLoaderInfo:
             "optional": {
                 "clip": ("CLIP", {"tooltip": "Optional text encoder. Leave unconnected for model-only LoRAs "
                                              "(the clip output is then empty)."}),
-                "model_info_file": ("STRING", {"default": "",
+                "model_info_file": ("STRING", {"advanced": True, "default": "",
                     "placeholder": "empty = <ComfyUI user dir>/pertineo_vfx/model_info.ods / .xlsx / .csv / .json",
                     "tooltip": "Same file as in Pertineo Collect Metadata. Empty = "
                                "<ComfyUI user dir>/pertineo_vfx/model_info.ods / .xlsx / .csv / .json."}),
-                "lookup_by_hash": ("BOOLEAN", {"default": True,
+                "lookup_by_hash": ("BOOLEAN", {"advanced": True, "default": True,
                     "tooltip": "Find the entry by SHA256 (survives renaming; hash is cached). Off = by file "
                                "name only."}),
             },
@@ -676,6 +706,9 @@ MODEL_INFO_TYPES = [  # (class suffix, display label, ComfyUI model folder)
 
 class _ModelInfoBase:
     CATEGORY = CATEGORY + "/Model Info"
+    # 1.5.0: replaced by the Loader + Info nodes (Pertineo/Loaders). Hidden in the node library, but existing
+    # workflows keep working; show them again with ComfyUI's setting for deprecated nodes.
+    DEPRECATED = True
     RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("name", "base_model", "trigger_words", "recommended", "license", "info")
     FUNCTION = "run"
@@ -721,10 +754,14 @@ for _suffix, _label, _folder in MODEL_INFO_TYPES:
         "FOLDER": _folder, "LABEL": _label,
         "DESCRIPTION": (f"Shows what your model_info file says about a {_label} – name, base model, trigger "
                         f"words, recommended settings, license and source. Only reads the file; nothing is "
-                        f"loaded into memory. Connect 'info' to a text preview or use the single outputs."),
+                        f"loaded into memory. Connect 'info' to a text preview or use the single outputs. "
+                        f"Deprecated since 1.5.0: use the matching Loader + Info node (Pertineo/Loaders), which "
+                        f"loads the model and gives the same info."),
     })
     MODEL_INFO_CLASSES[_cls.__name__] = (_cls, f"Pertineo Model Info ({_label})")
 
+
+from .loaders import LOADER_CLASSES  # noqa: E402 – needs info_outputs defined above
 
 NODE_CLASS_MAPPINGS = {
     "PertineoCollectMetadata": PertineoCollectMetadata,
@@ -732,6 +769,7 @@ NODE_CLASS_MAPPINGS = {
     "PertineoSaveImageMetadata": PertineoSaveImageMetadata,
     "PertineoLoraLoaderInfo": PertineoLoraLoaderInfo,
     **{k: v[0] for k, v in MODEL_INFO_CLASSES.items()},
+    **{k: v[0] for k, v in LOADER_CLASSES.items()},
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PertineoCollectMetadata": "Pertineo Collect Metadata",
@@ -739,4 +777,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PertineoSaveImageMetadata": "Pertineo Save Image + Metadata",
     "PertineoLoraLoaderInfo": "Pertineo LoRA Loader + Info",
     **{k: v[1] for k, v in MODEL_INFO_CLASSES.items()},
+    **{k: v[1] for k, v in LOADER_CLASSES.items()},
 }

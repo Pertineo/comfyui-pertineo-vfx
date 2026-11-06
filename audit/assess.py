@@ -229,7 +229,8 @@ def input_assets(graph, executed, show, warn, compute_hashes=True):
     others = [n for n in graph.nodes if n not in exe]
     for nid in list(executed) + others:
         ct = graph.ctype(nid)
-        if ct.startswith(("PertineoCollectMetadata", "PertineoSaveImageMetadata", "PertineoModelInfo")):
+        if ct.startswith(("PertineoCollectMetadata", "PertineoSaveImageMetadata", "PertineoModelInfo",
+                          "PertineoSaveMedia", "PertineoOutputName")):
             continue
         for name, raw in graph.inputs(nid).items():
             ok, val, _n, _c = graph.resolve(raw)

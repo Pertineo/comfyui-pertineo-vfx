@@ -206,6 +206,11 @@ def render(data, short=False):
         L += _kv("Saved", _date(f.get("saved")))
         L += _kv("Image", f"{f['width']} x {f['height']} · {f.get('format', '?')}")
         L += _kv("Folder", f.get("folder", "?"))
+        # 1.5.0: Save Media – one report for a sequence / video / mask, each output on its own line
+        for o in f.get("outputs") or []:
+            L += _kv("Output", o.get("text", "?"))
+        if f.get("checksums"):
+            L += _kv("Checksums", f["checksums"])
         if f.get("sha256"):
             L += _kv("SHA256", f["sha256"])
     else:

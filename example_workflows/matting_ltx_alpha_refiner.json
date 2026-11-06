@@ -7,7 +7,7 @@
       "type": "Note",
       "pos": [
         40,
-        520
+        -380
       ],
       "size": [
         380,
@@ -35,7 +35,7 @@
       ],
       "size": [
         380,
-        520
+        470
       ],
       "flags": {},
       "order": 1,
@@ -80,7 +80,9 @@
         "red",
         true,
         "error",
-        true
+        true,
+        "still frame",
+        24.0
       ],
       "title": "PLATE (source sequence)"
     },
@@ -89,11 +91,11 @@
       "type": "PertineoLoadImageSequence",
       "pos": [
         40,
-        290
+        580
       ],
       "size": [
         380,
-        520
+        470
       ],
       "flags": {},
       "order": 2,
@@ -137,7 +139,9 @@
         "red",
         true,
         "error",
-        true
+        true,
+        "still frame",
+        24.0
       ],
       "title": "MATTE (coarse alpha, e.g. LTX)"
     },
@@ -321,7 +325,8 @@
         1001,
         4,
         "exr (32 bit float)",
-        true
+        true,
+        "_matte"
       ]
     },
     {
@@ -329,7 +334,7 @@
       "type": "MaskToImage",
       "pos": [
         1280,
-        320
+        420
       ],
       "size": [
         220,
@@ -365,7 +370,7 @@
       "type": "PreviewImage",
       "pos": [
         1280,
-        400
+        500
       ],
       "size": [
         380,

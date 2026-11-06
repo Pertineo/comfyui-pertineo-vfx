@@ -35,23 +35,23 @@ MATTING_INPUTS = {
     "tile_size": ("INT", {"default": 1024, "min": 256, "max": 4096, "step": 32,
         "tooltip": "Tile size in px. Use the largest size that fits into VRAM: more context = better matte. "
                    "VRAM grows quadratically (approx. 1536 fits into 32 GB, 2048 does not)."}),
-    "overlap": ("INT", {"default": 256, "min": 0, "max": 2048, "step": 16,
+    "overlap": ("INT", {"advanced": True, "default": 256, "min": 0, "max": 2048, "step": 16,
         "tooltip": "Overlap between tiles in px. Tiles are blended with smooth weights, so there are no seams. "
                    "More overlap = smoother transitions, slightly longer render."}),
-    "flip_tta": ("BOOLEAN", {"default": True,
+    "flip_tta": ("BOOLEAN", {"advanced": True, "default": True,
         "tooltip": "Test-time augmentation: every tile is computed a second time horizontally flipped and both "
                    "results are averaged. Cleaner, calmer edges at twice the render time."}),
-    "clamp_known": ("BOOLEAN", {"default": True,
+    "clamp_known": ("BOOLEAN", {"advanced": True, "default": True,
         "tooltip": "After matting, force alpha to 0 where the trimap is black and to 1 where it is white. "
                    "Removes noise in background and core, but trimap errors can no longer be corrected."}),
-    "quantize_trimap": ("BOOLEAN", {"default": True,
+    "quantize_trimap": ("BOOLEAN", {"advanced": True, "default": True,
         "tooltip": "Before matting, round the trimap to 0 / 0.5 / 1 (cleans dithered or color-shifted trimaps). "
                    "Turn off to pass a soft trimap unchanged, like the Nuke Cattery node does."}),
 }
 
 
 OPTIONAL_MATTING_INPUTS = {
-    "custom_model": ("STRING", {"default": "", "multiline": True,
+    "custom_model": ("STRING", {"advanced": True, "default": "", "multiline": True,
         "placeholder": "only for model = custom: folder of your own ViTMatte weights",
         "tooltip": "Only used when model is 'custom'. Absolute path, or the name of a subfolder in the "
                    "'vitmatte' model folder. Must contain a ViTMatte model in Hugging Face format "
@@ -114,9 +114,9 @@ class PertineoTrimapFromMatte:
                 "matte_channel": (MATTE_CHANNELS, {
                     "tooltip": "Only used with matte_image: which channel of the image holds the matte. "
                                "For a matte rendered as grey RGB, red or luminance both work."}),
-                "invert_matte": ("BOOLEAN", {"default": False,
+                "invert_matte": ("BOOLEAN", {"advanced": True, "default": False,
                     "tooltip": "Invert the matte first (e.g. for masks from LoadImage alpha, which are inverted)."}),
-                "invert_garbage": ("BOOLEAN", {"default": False,
+                "invert_garbage": ("BOOLEAN", {"advanced": True, "default": False,
                     "tooltip": "Off: white in garbage_mask = garbage (forced to background). "
                                "On: white = keep, everything OUTSIDE is garbage – like a roto drawn around the subject."}),
             },
@@ -258,7 +258,7 @@ class PertineoViTMatteSequence:
                     "tooltip": "PNG 16 bit (read as raw/linear) or EXR 32-bit float (alpha in R, G, B and A)."}),
                 "exr_plate_to_srgb": ("BOOLEAN", {"default": True,
                     "tooltip": "EXR plates are scene-linear; ViTMatte expects sRGB. On = convert linear to sRGB "
-                               "(recommended). Has no effect on PNG/TIFF plates."}),
+                               "(recommended). Only affects .exr plates. If an EXR looks flat or washed out with this on, it was saved with sRGB values (some ComfyUI savers do that) – turn it off."}),
                 **MATTING_INPUTS,
                 "skip_existing": ("BOOLEAN", {"default": True,
                     "tooltip": "Skip frames that already exist in the output folder (resume after an abort). "
