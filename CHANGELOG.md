@@ -3,6 +3,55 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.6.0 – 2026-11-08
+
+### Added
+- **Pertineo Save Media – sound as its own file:** the `audio` input is now also written as `<name>_v003.wav` /
+  `.flac` next to the video (new options `audio_write`, default on, and `audio_format`, right after `video_audio`).
+  Formats: WAV 24 bit (default), WAV 32-bit float (keeps peaks above 0 dBFS, as audio models often produce them), WAV 16 bit, FLAC 24 / 16 bit (lossless, needs ffmpeg; carries the
+  workflow when `meta_embed_workflow` is on), MP3 320 kbit/s as a review copy to send around (lossy, a few ms of
+  encoder padding – not for delivery or sync; carries the workflow in ID3 tags). WAV needs no extra dependency.
+  - **Audio only:** Save Media now works without images – e.g. for music or speech generation. The file is written
+    in full length; the player on the node shows the waveform with the sound, and the audit PDF uses the waveform
+    as its thumbnail.
+  - With images connected the file has exactly their length at `video_fps` (in sync with the frames and the video,
+    first sample = first frame) – the report notes the original length when it was cut or padded.
+  - The audio file is part of the version (*next free* counts it), the `.sha256` list and the audit report (format,
+    sample rate, channels, duration, peak level in dBFS, and how many samples were clipped by an integer format).
+  - The silent track of `video_audio` *always* is never written as a file.
+- **Output Name:** the preview of the file names lists the audio file.
+- **Collect Metadata – audio:** new optional input `output_audio` (at the end) and output `audio` (passed through,
+  like `image`). Connect the generated sound there in audio-only workflows: the audit then runs after the
+  generation, and the report shows *Final audio* (duration, sample rate, channels). Audio latents (e.g.
+  EmptyAceStepLatentAudio: length in seconds) and the `tags` / `lyrics` of ACE-Step are recorded; the workflow type
+  reads *text-to-audio* / *audio-to-audio*. For sound only, the image lines (source image, generated at) are left
+  out when they carry nothing.
+- **Collect Metadata – source audio:** new optional input `source_audio` (at the end), the audio counterpart of
+  `source_image` – for sound that goes into a workflow (audio track for a video model, lip-sync reference …). The
+  report shows *Source audio* (duration, sample rate, channels) and a note when its length differs from the video by
+  more than one frame.
+- **Collect Metadata – music models:** MiniMax Music 3 is read as well: its `caption` (style prompt) next to the
+  lyrics, and the generation settings of music text encoders (seed, duration, cfg_scale, top_k) under *Other
+  settings*. *Generated at* shows the audio length. For music the workflow type reads *text-to-audio* only (no
+  *voice / lip-sync*).
+- **Report – Save Media output:** only the settings of what was actually written are listed (no sequence or video
+  settings for a music file; workflow embedding only where the format carries it). Reproducibility notes say
+  "this output" instead of "this image".
+- **Collect Metadata – switches:** with ComfyUI's If/Else Switch only the chosen branch runs. The other branch no
+  longer counts as part of the run (no settings, models or nodes from it in the report); it is listed under
+  *Inactive nodes* as "not run – the switch chose the other branch". Frontend-only widgets such as `video-preview`
+  are left out of the node settings.
+
+### Breaking
+- **Save Media:** `audio_write` and `audio_format` sit between `video_audio` and `if_exists`. ComfyUI stores widget
+  values by position, so in workflows saved with 1.5.0 the values from `if_exists` on are shifted – replace Save Media
+  there with a new one (or check every value). The template `io_save_media_with_output_name` is updated.
+
+### Changed
+- **Save Media** `preview` and **Load Image Sequence** `preview_type`: the choice *video* is now called *player* (it
+  also plays sound only). Workflows saved with *video* keep working – the old value is still accepted.
+- The audio player shows the waveform with a running playhead, a time ruler and peaks above 0 dBFS in red.
+
 ## 1.5.0 – 2026-11-04
 
 ### Added

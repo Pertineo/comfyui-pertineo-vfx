@@ -45,8 +45,8 @@ _MANUAL_TIP = (" Write 'none' if there is nothing to declare. Empty = the report
 class PertineoCollectMetadata:
     CATEGORY = CATEGORY
     # 1.4.3: image is appended last – existing links to metadata_text / metadata_json keep their slots
-    RETURN_TYPES = ("STRING", "STRING", "IMAGE")
-    RETURN_NAMES = ("metadata_text", "metadata_json", "image")
+    RETURN_TYPES = ("STRING", "STRING", "IMAGE", "AUDIO")
+    RETURN_NAMES = ("metadata_text", "metadata_json", "image", "audio")
     OUTPUT_TOOLTIPS = ("The readable report.", "The machine-readable report (JSON).",
                        "output_image, passed through unchanged – connect it to Save Image + Metadata so one cable "
                        "carries image and metadata. Empty when output_image is not connected. Collect Metadata "
@@ -131,6 +131,19 @@ class PertineoCollectMetadata:
                                    "the prompt → label image",
                     "tooltip": "Optional: what this step does in one or two sentences – the breakdown line for "
                                "this step. Same for every iteration of the step, like 'step'."}),
+                # 1.6.0 – appended at the end, so existing workflows keep their values
+                "source_audio": ("AUDIO", {
+                    "tooltip": "Optional: the sound that goes INTO the workflow – e.g. the audio track given to a "
+                               "video model (LTX …), a lip-sync / voice reference or the music a video is cut to. "
+                               "The audio counterpart of source_image: its duration, sample rate and channels go "
+                               "into the report. The file it was loaded from is listed under INPUT FILES with its "
+                               "SHA256 anyway."}),
+                "output_audio": ("AUDIO", {
+                    "tooltip": "Optional: the generated sound (music, speech …) – the audio counterpart of "
+                               "output_image. Connect it for audio-only workflows: it makes sure the audit is "
+                               "collected AFTER the generation (values produced in this run are read then), and "
+                               "records duration, sample rate and channels. Passed through unchanged at the audio "
+                               "output – connect that to Save Media."}),
             },
             # EXECUTION_LIST gives access to values other nodes produced in this run (e.g. a prompt
             # joined by a text node) – used only where a value cannot be read from the graph itself.
@@ -146,7 +159,7 @@ class PertineoCollectMetadata:
     def run(self, workflow_purpose, reference_image_sources, external_software, changes_outside_comfyui, notes,
             compute_model_hashes, model_info_file, include_full_paths, source_image=None, output_image=None,
             fps=0.0, author="", company="", include_author=True, prompt=None, extra_pnginfo=None, unique_id=None,
-            execution_list=None, production_context=None, step="", step_description=""):
+            execution_list=None, production_context=None, step="", step_description="", output_audio=None, source_audio=None):
         manual = {"workflow_purpose": workflow_purpose, "reference_image_sources": reference_image_sources,
                   "external_software": external_software, "changes_outside_comfyui": changes_outside_comfyui,
                   "notes": notes}
@@ -160,7 +173,8 @@ class PertineoCollectMetadata:
         try:
             data = C.collect(prompt, extra_pnginfo, str(unique_id) if unique_id is not None else None, manual,
                              compute_model_hashes, model_info_file, include_full_paths,
-                             source_image, output_image, fps, execution_list, production_context)
+                             source_image, output_image, fps, execution_list, production_context,
+                             output_audio=output_audio, source_audio=source_audio)
         except Exception as e:  # last line of defence: never stop the generation
             traceback.print_exc()
             data = {"schema": C.SCHEMA, "generated": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -174,7 +188,7 @@ class PertineoCollectMetadata:
             text = f"{HEADER}\nReport rendering failed ({type(e).__name__}). See metadata_json.\n"
         n_models = len(data.get("models") or [])
         print(f"{LOG} Audit: {n_models} model file(s), {len(data.get('warnings') or [])} warning(s)")
-        return (text, json.dumps(data, indent=2, ensure_ascii=False, default=str), output_image)
+        return (text, json.dumps(data, indent=2, ensure_ascii=False, default=str), output_image, output_audio)
 
 
 # --------------------------------------------------------------------------

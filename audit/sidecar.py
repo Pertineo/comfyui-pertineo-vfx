@@ -65,9 +65,10 @@ def write_audit(folder, base, file_info, meta, metadata_text, thumb, write_txt, 
     per_json = dict(meta or {})
     per_json["file"] = file_info
     written = []
+    size = (f"Image: {file_info['width']}x{file_info['height']} · " if file_info.get("width") and file_info.get("height")
+            else "Media: ")
     file_line = (f"File: {file_info['name']}    Saved: {file_info['saved']}\n"
-                 f"Image: {file_info['width']}x{file_info['height']} · {file_info['format']} · "
-                 f"folder {file_info['folder']}")
+                 f"{size}{file_info['format']} · folder {file_info['folder']}")
     txt = pdf_txt = None
     if write_txt or write_pdf:
         if isinstance(meta, dict) and meta.get("schema") == C.SCHEMA:

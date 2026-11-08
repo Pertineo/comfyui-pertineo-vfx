@@ -46,7 +46,9 @@ def _preview(arr, max_size=768):
     return {"filename": name, "subfolder": "", "type": "temp"}
 
 
-PREVIEW_MODES = ["video", "still frame", "off"]
+# "video" was the name of "player" up to 1.5.0 – still accepted, so saved workflows keep working
+PREVIEW_MODES = ["player", "still frame", "off"]
+PREVIEW_LEGACY = {"video": "player"}
 
 _VERSION_TIP = ("next free = one more than the highest version already in the output folder (and its date folders) "
                 "for this name – counting every output: image or mask sequence, video, audit file. So all outputs "
@@ -71,7 +73,8 @@ class PertineoSaveMedia:
                    "version: <name>_v003.mov, folder <name>_v003/ with <name>_v003.1001.png next to it, the mask "
                    "as <name>_v003_mask/ (and _mask.mov). Folders are created automatically. PNG / TIFF / EXR / JPG "
                    "in 8, 16 or 32 bit, written in parallel on several cores. Video through ffmpeg (H.264 preview, "
-                   "H.265 10 bit, ProRes 422 HQ / 4444). SHA256 list of all files, one audit report for the whole "
+                   "H.265 10 bit, ProRes 422 HQ / 4444). Sound as its own file <name>_v003.wav / .flac – also "
+                   "without any images, e.g. for music generation. SHA256 list of all files, one audit report for the whole "
                    "output (connect Pertineo Collect Metadata). Folder, name, version and date folder come from "
                    "Pertineo Output Name (with a preview of the names); without it: <output>/render_v###.")
 
@@ -147,6 +150,22 @@ class PertineoSaveMedia:
                                "it. always = with nothing connected, a silent stereo track (48 kHz, exact video "
                                "length) is written – a base track for editing, as many video tools expect one. .mov: "
                                "24-bit PCM, .mp4: AAC (note: DaVinci Resolve on Linux does not play AAC – use .mov)."}),
+                # 1.6.0: audio_write / audio_format sit here, next to the video settings – workflows saved
+                # with 1.5.0 need Save Media set up again (widget values are stored by position)
+                "audio_write": ("BOOLEAN", {"default": True,
+                    "tooltip": "Write the connected audio as its own file <name>_v###.wav / .flac next to the video "
+                               "(for editing / mixing, and for audio-only outputs such as music generation). With "
+                               "images connected it has exactly their length at video_fps (in sync with the frames "
+                               "and the video, first sample = first frame); without images it is written in full "
+                               "length. The silent track of video_audio 'always' is never written as a file."}),
+                "audio_format": (M.AUDIO_FORMATS, {"default": M.AUDIO_FORMAT_DEFAULT,
+                    "tooltip": "wav 24 bit = the delivery standard, read everywhere (default). wav 32 bit float = "
+                               "keeps peaks above 0 dBFS, as many audio models produce them (no clipping). wav 16 bit "
+                               "= CD / web. flac = lossless and about half the size (needs ffmpeg; 16 / 24 bit, "
+                               "clips above 0 dBFS like every integer format). mp3 320 kbit/s = small review copy "
+                               "to send around, lossy and not sample-exact (the encoder adds a few ms of padding) – "
+                               "not for delivery or sync (needs ffmpeg with libmp3lame). The report "
+                               "notes clipped samples."}),
                 "if_exists": (M.IF_EXISTS, {"advanced": True,
                     "tooltip": "What to do when the output already exists (only possible with version fixed / off "
                                "or Output Name set to fixed / off): stop with an error (safe) or overwrite."}),
@@ -171,17 +190,21 @@ class PertineoSaveMedia:
                     "tooltip": "Write <name>_v###.sha256 with the SHA256 of every frame and video (sha256sum "
                                "format – check later with: sha256sum -c <file>). Also added to the audit .json."}),
                 "preview": (PREVIEW_MODES, {
-                    "tooltip": "What the node shows after the run. video = a player with a small H.264 copy (max. 540 "
-                               "px high, with audio; only in ComfyUI's temp folder, deleted on restart – your outputs "
-                               "are untouched). still frame = the middle frame. off = nothing (fastest)."}),
+                    "tooltip": "What the node shows after the run. player = a small H.264 copy to play on the node "
+                               "(max. 540 px high, with sound; for audio only: the waveform with a running playhead "
+                               "and a time ruler). Only in ComfyUI's temp folder, deleted on restart – your outputs "
+                               "are untouched. still frame = the middle frame (audio only: the waveform). off = "
+                               "nothing (fastest)."}),
             },
             "optional": {
                 "images": ("IMAGE", {"tooltip": "Image batch (the frames of the sequence / video)."}),
                 "mask": ("MASK", {"tooltip": "Mask / matte batch."}),
                 "audio": ("AUDIO", {
-                    "tooltip": "Sound for the image video (e.g. the audio output of Pertineo Load Video). Cut or padded "
-                               "with silence to the video length; starts with the first frame. .mov: 24-bit PCM "
-                               "(lossless), .mp4: AAC 320 kbit/s. Not added to the mask video or the sequences."}),
+                    "tooltip": "Sound, e.g. from a music / speech model or the audio output of Pertineo Load Video. "
+                               "Written as its own file <name>_v###.wav / .flac (see audio_write) and as the sound "
+                               "track of the image video: cut or padded with silence to the video length; starts "
+                               "with the first frame. .mov: 24-bit PCM (lossless), .mp4: AAC 320 kbit/s. Not added "
+                               "to the mask video or the sequences. Works without images, too (audio only)."}),
                 "output_name": ("PERTINEO_OUTPUT_NAME", {
                     "tooltip": "From Pertineo Output Name: folder, name, version and date folder are set there, with a "
                                "preview of the file names before rendering. Connect one Output Name to several Save "
@@ -196,6 +219,13 @@ class PertineoSaveMedia:
         }
 
     @classmethod
+    def VALIDATE_INPUTS(cls, preview=None):
+        # own check for 'preview', so the old value "video" (up to 1.5.0) still passes
+        if preview is None or preview in PREVIEW_MODES or preview in PREVIEW_LEGACY:
+            return True
+        return f"preview: '{preview}' is not one of {', '.join(PREVIEW_MODES)}"
+
+    @classmethod
     def IS_CHANGED(cls, output_name=None, **kwargs):
         # without Output Name: next free writes a new version on every queue (otherwise ComfyUI would skip an
         # unchanged run); with Output Name connected, that node decides
@@ -208,8 +238,8 @@ class PertineoSaveMedia:
             mask_write, mask_format,
             video_write, video_of, video_quality, video_fps, video_alpha, video_audio,
             if_exists, meta_embed_workflow, meta_write_workflow, meta_json, meta_txt, meta_pdf, meta_checksums,
-            preview="video", images=None, mask=None, audio=None, output_name=None, metadata_text=None,
-            metadata_json=None, prompt=None, extra_pnginfo=None):
+            preview="player", images=None, mask=None, audio=None, output_name=None, metadata_text=None,
+            metadata_json=None, audio_write=True, audio_format=M.AUDIO_FORMAT_DEFAULT, prompt=None, extra_pnginfo=None):
         # widget names carry their group (seq_ / mask_ / video_ / meta_); the code below uses the plain names
         write_sequence, sequence_format, compression = seq_write, seq_format, seq_compression
         start_frame, frame_padding, exr_to_linear, clamp = seq_start_frame, seq_padding, seq_exr_to_linear, seq_clamp
@@ -217,6 +247,7 @@ class PertineoSaveMedia:
         write_mask, write_video, fps = mask_write, video_write, video_fps
         embed_workflow, write_workflow, write_json = meta_embed_workflow, meta_write_workflow, meta_json
         write_txt, write_pdf, write_checksums = meta_txt, meta_pdf, meta_checksums
+        preview = PREVIEW_LEGACY.get(preview, preview)
         t0 = time.time()
         imgs = _np(images)
         masks = _np(mask)
@@ -229,9 +260,15 @@ class PertineoSaveMedia:
         do_mask = bool(write_mask and masks is not None)
         vid_img = bool(write_video and imgs is not None and video_of in ("image", M.VIDEO_OF[2]))
         vid_mask = bool(write_video and masks is not None and video_of in ("mask", M.VIDEO_OF[2]))
-        if not (do_seq or do_mask or vid_img or vid_mask):
-            raise ValueError(f"{LOG} Save Media: nothing to write – connect images and / or mask and turn on "
-                             f"seq_write, mask_write or video_write.")
+        # the sound as its own file: with images in sync with them (their length at video_fps), otherwise full length
+        snd_full = M.audio_array(audio)
+        if audio is not None and snd_full is None:
+            print(f"{LOG} Save Media: the audio input holds no usable sound – ignored.")
+        audio_only = imgs is None and masks is None
+        do_audio = bool(audio_write and snd_full is not None)
+        if not (do_seq or do_mask or vid_img or vid_mask or do_audio):
+            raise ValueError(f"{LOG} Save Media: nothing to write – connect images, mask and / or audio and turn on "
+                             f"seq_write, mask_write, video_write or audio_write.")
         if imgs is not None and masks is not None and len(imgs) != len(masks):
             print(f"{LOG} Save Media: {len(imgs)} images but {len(masks)} masks – each is written with its own length.")
 
@@ -248,11 +285,12 @@ class PertineoSaveMedia:
         seq_ext, mask_ext, vext = M.ext_for(sequence_format), M.ext_for(mask_format), M.video_ext(video_quality)
         vid_path = os.path.join(folder, base + vext)
         vid_mask_path = os.path.join(folder, mbase + vext)
+        aud_path = os.path.join(folder, base + M.audio_ext(audio_format))
         has_meta = bool(metadata_text or metadata_json)
-        # companion files (.sha256, .workflow.json, .audit.*) are named after the main output: the image name, or
-        # the mask name when this node writes only the mask – so a second Save Media for the mask can share one
-        # Output Name without clashing with the first
-        xbase = base if (do_seq or vid_img) else mbase
+        # companion files (.sha256, .workflow.json, .audit.*) are named after the main output: the image name (also
+        # for sound only), or the mask name when this node writes only the mask – so a second Save Media for the
+        # mask can share one Output Name without clashing with the first
+        xbase = base if (do_seq or vid_img or do_audio) else mbase
 
         targets = []
         if do_seq:
@@ -263,6 +301,8 @@ class PertineoSaveMedia:
             targets.append(vid_path)
         if vid_mask:
             targets.append(vid_mask_path)
+        if do_audio:
+            targets.append(aud_path)
         if write_checksums:
             targets.append(os.path.join(folder, xbase + ".sha256"))
         if write_workflow:
@@ -303,16 +343,17 @@ class PertineoSaveMedia:
         if vid_mask:
             video_jobs.append(("mask video", vid_mask_path, masks, True))
         encoders = {}
-        # the workflow (credentials redacted) – embedded in the videos and written as .workflow.json
+        # the workflow (credentials redacted) – embedded in the videos / FLAC and written as .workflow.json
+        embed_into = video_jobs or (do_audio and aud_path.endswith((".flac", ".mp3")))
         wf = None
-        if write_workflow or has_meta or (embed_workflow and video_jobs):
+        if write_workflow or has_meta or (embed_workflow and embed_into):
             try:
                 from ..audit import sidecar as S
                 wf = S.workflow_record(prompt, extra_pnginfo)
             except Exception as e:
                 print(f"{LOG} Save Media: workflow not available ({type(e).__name__}: {e})")
         video_meta = None
-        if embed_workflow and video_jobs and wf:
+        if embed_workflow and embed_into and wf:
             video_meta = {"comment": json.dumps({k: wf[k] for k in ("prompt", "workflow") if k in wf},
                                                 ensure_ascii=False, separators=(",", ":"), default=str)}
             for k in ("prompt", "workflow"):
@@ -322,8 +363,13 @@ class PertineoSaveMedia:
         if audio is None and vid_img and str(video_audio).startswith("always"):
             audio = {"waveform": np.zeros((1, 2, 1), dtype=np.float32), "sample_rate": 48000}  # padded to length
         sound = M.audio_for_video(audio, len(imgs), fps) if (vid_img and audio is not None) else None
-        if audio is not None and not vid_img:
-            print(f"{LOG} Save Media: audio is connected but no image video is written – audio not used.")
+        sync_frames = len(imgs) if imgs is not None else (len(masks) if masks is not None else 0)
+        aud_sound = None
+        if do_audio:
+            aud_sound = M.audio_for_video(audio, sync_frames, fps) if sync_frames else snd_full
+        if snd_full is not None and not (vid_img or do_audio):
+            print(f"{LOG} Save Media: audio is connected but neither an image video nor audio_write is on – "
+                  f"audio not used.")
 
         def encode_all():
             for label, path, arr, is_mask in video_jobs:
@@ -338,11 +384,29 @@ class PertineoSaveMedia:
                                                 progress=lambda d, t: pbar.update_absolute(d, t))
             if vfut is not None:
                 vfut.result()
+        # ---- sound as its own file ----------------------------------------
+        aud_info = None
+        if do_audio:
+            M.write_audio(aud_path, aud_sound, audio_format, overwrite=overwrite,
+                          metadata=video_meta if aud_path.endswith((".flac", ".mp3")) else None)
+            aud_info = M.audio_stats(aud_sound)
+            src = M.audio_stats(snd_full)
+            if aud_info["samples"] != src["samples"]:
+                aud_info["source_duration_sec"] = src["duration_sec"]
+            clipped = aud_info["over_full_scale"] if "float" not in audio_format else 0
+            if clipped:
+                aud_info["clipped_samples"] = clipped
+                print(f"{LOG} Save Media: {clipped} audio sample(s) above 0 dBFS were clipped in {audio_format} – "
+                      f"use wav (32 bit float) to keep them.")
         if write_checksums:
             for _l, path, _a, _m in video_jobs:
                 digests[path] = M.sha256_file(path)
+            if do_audio:
+                digests[aud_path] = M.sha256_file(aud_path)
         written = [d for d in (P["seq_dir"] if do_seq else None, P["mask_dir"] if do_mask else None) if d]
         written += [p for _l, p, _a, _m in video_jobs]
+        if do_audio:
+            written.append(aud_path)
 
         # ---- warn about old frames left over by an overwrite --------------
         if overwrite:
@@ -375,7 +439,7 @@ class PertineoSaveMedia:
                 if has_meta:
                     meta = S.parse_meta(metadata_json)
                     first = imgs if imgs is not None else masks
-                    h, w = first.shape[1], first.shape[2]
+                    h, w = (first.shape[1], first.shape[2]) if first is not None else (None, None)
                     outputs = []
                     last = lambda n: start_frame + n - 1
                     if do_seq:
@@ -398,11 +462,27 @@ class PertineoSaveMedia:
                                                 f"@ {fps:g} fps · {encoders.get(path)}"
                                                 + ("" if _m or sound is None else
                                                    f" · audio {sound[1]} Hz {sound[0].shape[0]} ch")})
+                    if do_audio:
+                        a = aud_info
+                        peak = "–inf" if a["peak_dbfs"] is None else f"{a['peak_dbfs']:+.2f}"
+                        extra = ""
+                        if sync_frames:
+                            extra += (f" · matched to {sync_frames} frames @ {fps:g} fps"
+                                      + (f" (source {M.duration_text(a['source_duration_sec'])})"
+                                         if "source_duration_sec" in a else ""))
+                        if a.get("clipped_samples"):
+                            extra += f" · {a['clipped_samples']} samples clipped"
+                        outputs.append(dict(a, kind="audio", path=os.path.basename(aud_path), format=audio_format,
+                                            sha256=digests.get(aud_path),
+                                            text=f"audio {os.path.basename(aud_path)} · {audio_format} · "
+                                                 f"{a['sample_rate']} Hz {a['channels']} ch · "
+                                                 f"{M.duration_text(a['duration_sec'])} · peak {peak} dBFS{extra}"))
                     file_info = {
                         "name": xbase, "basename": xbase, "batch_index": 0, "batch_size": 1, "width": w, "height": h,
                         "format": ", ".join(o["kind"] for o in outputs), "folder": S.display_folder(folder, meta),
                         "saved": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-                        "version": ver, "first_frame": start_frame, "fps": fps, "outputs": outputs,
+                        "version": ver, "first_frame": start_frame if sync_frames else None,
+                        "fps": fps if sync_frames else None, "outputs": outputs,
                     }
                     if checksum_name:
                         file_info["checksums"] = checksum_name
@@ -411,7 +491,11 @@ class PertineoSaveMedia:
                     files = [p for p in digests if digests.get(p)]
                     if len(files) == 1:  # a single file: its hash is the link to the next workflow
                         file_info["sha256"] = digests[files[0]]
-                    thumb = first[len(first) // 2]
+                    if first is not None:
+                        thumb = first[len(first) // 2]
+                    else:  # sound only: the waveform as the PDF thumbnail
+                        file_info["duration_sec"] = aud_info["duration_sec"] if aud_info else None
+                        thumb = M.waveform_image(aud_sound, 960, 300) if aud_sound is not None else None
                     written += S.write_audit(folder, xbase, file_info, meta, metadata_text, thumb, write_txt,
                                              write_json, write_pdf, workflow=wf_rec, overwrite=overwrite)
             except Exception as e:
@@ -419,13 +503,29 @@ class PertineoSaveMedia:
                 print(f"{LOG} Save Media: audit / workflow files could not be written ({type(e).__name__}: {e})")
 
         n_frames = len(jobs)
-        print(f"{LOG} Save Media: wrote {n_frames} frame(s)" + (f" and {len(video_jobs)} video(s)" if video_jobs else "")
+        print(f"{LOG} Save Media: wrote {n_frames} frame(s)" + (f", {len(video_jobs)} video(s)" if video_jobs else "")
+              + (f", audio {M.duration_text(aud_info['duration_sec'])}" if aud_info else "")
               + f" in {time.time() - t0:.1f} s")
         for p in written:
             print(f"{LOG}   {p}")
         prev_src = imgs if imgs is not None else masks
         ui = {}
-        if preview == "video" and len(prev_src) > 1:
+        if prev_src is None:  # sound only: a player with the waveform as picture, or the waveform as still
+            if preview != "off" and aud_sound is not None:
+                wave = M.waveform_image(aud_sound)
+                if preview == "player":
+                    try:
+                        name = f"pertineo_media_preview_{uuid.uuid4().hex[:10]}.mp4"
+                        M.write_preview_audio(os.path.join(folder_paths.get_temp_directory(), name), aud_sound, wave)
+                        ui = {"images": [{"filename": name, "subfolder": "", "type": "temp",
+                                          "format": "video/h264-mp4"}], "animated": (True,)}
+                    except Exception as e:  # the preview must never fail the save
+                        print(f"{LOG} Save Media: audio preview failed ({type(e).__name__}: {e}) – showing the "
+                              f"waveform.")
+                if not ui:
+                    ui = {"images": [_preview(wave, 1280)]}
+            return {"ui": ui, "result": (base, ver, folder, "\n".join(written))}
+        if preview == "player" and len(prev_src) > 1:
             try:
                 name = f"pertineo_media_preview_{uuid.uuid4().hex[:10]}.mp4"
                 M.write_preview_video(os.path.join(folder_paths.get_temp_directory(), name), prev_src, fps,
@@ -454,9 +554,10 @@ def preview_text(P, root, note):
         f"image sequence:  {b}/{b}.####.<ext>",
         f"mask sequence:   {m}/{m}.####.<ext>",
         f"mask video:      {m}.mov / .mp4",
+        f"audio:           {b}.wav / .flac / .mp3",
         f"audit:           {b}.audit.txt / .json / .pdf",
         f"extras:          {b}.sha256 · .workflow.json",
-        "(#### = frame number · <ext> and .mov / .mp4 = format chosen in Save Media)",
+        "(#### = frame number · <ext>, .mov / .mp4 and .wav / .flac / .mp3 = format chosen in Save Media)",
     ])
 
 

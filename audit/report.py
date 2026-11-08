@@ -204,7 +204,10 @@ def render(data, short=False):
         batch = f" (image {f['batch_index'] + 1} of {f['batch_size']})" if f.get("batch_size", 1) > 1 else ""
         L += _kv("File", f"{f['name']}{batch}")
         L += _kv("Saved", _date(f.get("saved")))
-        L += _kv("Image", f"{f['width']} x {f['height']} · {f.get('format', '?')}")
+        if f.get("width") and f.get("height"):
+            L += _kv("Image", f"{f['width']} x {f['height']} · {f.get('format', '?')}")
+        else:  # 1.6.0: sound only (Save Media with audio, no images)
+            L += _kv("Media", f.get("format", "?"))
         L += _kv("Folder", f.get("folder", "?"))
         # 1.5.0: Save Media – one report for a sequence / video / mask, each output on its own line
         for o in f.get("outputs") or []:
@@ -462,6 +465,11 @@ def render(data, short=False):
             res_sz = f", result {lat['result_width']} x {lat['result_height']}" if "result_width" in lat else ""
             L += _kv("Latent", f"none – image-based (samples tiles of the input image){res_sz}",
                      indent=INDENT * 2)
+        elif lat.get("audio"):  # 1.6.0: audio latent
+            sec = f", {_fmt(lat['audio_seconds'])} s" if "audio_seconds" in lat else ""
+            bs = f", batch {_fmt(lat['batch_size'])}" if "batch_size" in lat else ""
+            L += _kv("Latent", f"audio{sec}{bs} – {lat.get('note') or 'empty audio latent'}"
+                     if lat.get("note") else f"audio{sec}{bs} (empty audio latent)", indent=INDENT * 2)
         elif "latent_width" in lat:
             L += _kv("Latent", f"latent {lat['latent_width']} x {lat['latent_height']} – {U} – VAE scale factor "
                                f"not known, pixel size not recorded", indent=INDENT * 2)
@@ -490,7 +498,9 @@ def render(data, short=False):
     res = data.get("resolution") or {}
     gens = []
     for g in res.get("generation") or []:
-        if "width" in g:
+        if g.get("audio"):  # 1.6.0
+            gens.append(f"audio, {_fmt(g['audio_seconds'])} s" if "audio_seconds" in g else (g.get("note") or "audio"))
+        elif "width" in g:
             gens.append(f"{g['width']} x {g['height']}" + ("  (encoded source image)" if g.get("same_as") else ""))
         elif g.get("image_based"):
             gens.append(f"{g['result_width']} x {g['result_height']} (image-based, tiled)" if "result_width" in g
@@ -519,13 +529,36 @@ def render(data, short=False):
         no_src = "none – no input is used as source (see INPUT FILES)"
     else:
         no_src = "– not connected –"
-    L += _kv("Source image", _size(res.get("source")) or no_src)
-    L += _kv("Generated at", " / ".join(dict.fromkeys(gens)) if gens else "–")
-    L += _kv("Final image", _size(res.get("final")) or "– not connected –")
+    au = data.get("audio")
+    # 1.6.0: sound only (output_audio connected, no image) – image sizes say nothing there, so the image lines
+    # are shown only when they carry something
+    audio_only = bool(au) and not res.get("final") and not res.get("source")
+    if not audio_only or src_in:
+        L += _kv("Source image" if not audio_only else "Source", _size(res.get("source")) or no_src)
+    known = [g for g in gens if not g.startswith(U)]
+    if not audio_only or known:
+        L += _kv("Generated at", " / ".join(dict.fromkeys(gens)) if gens else "–")
+    if res.get("final") or not au:
+        L += _kv("Final image", _size(res.get("final")) or "– not connected –")
+    sa = data.get("source_audio")
+    if sa:  # 1.6.0: source_audio connected
+        dur = f"{sa['duration_sec']:.3f} s" if sa.get("duration_sec") is not None else "?"
+        clips = f" · {sa['clips']} clips" if sa.get("clips") else ""
+        L += _kv("Source audio", f"{dur} · {sa.get('sample_rate') or '?'} Hz · {sa.get('channels') or '?'} ch{clips}")
+    if au:  # 1.6.0: output_audio connected
+        dur = f"{au['duration_sec']:.3f} s" if au.get("duration_sec") is not None else "?"
+        clips = f" · {au['clips']} clips (first one saved)" if au.get("clips") else ""
+        L += _kv("Final audio", f"{dur} · {au.get('sample_rate') or '?'} Hz · {au.get('channels') or '?'} ch{clips}")
     v = data.get("video")
     if v:
         dur = f"{v['duration_sec']:.3f} s" if v.get("duration_sec") is not None else "?"
         L += _kv("Video", f"{v.get('frames') or '?'} frames · {_fmt(v['fps'])} fps · {dur}")
+        # 1.6.0: a source sound of another length than the video is a common cause of drift / cut-off endings
+        if sa and sa.get("duration_sec") is not None and v.get("duration_sec") is not None and v.get("fps"):
+            diff = sa["duration_sec"] - v["duration_sec"]
+            if abs(diff) > 1.0 / float(v["fps"]):
+                L += _kv("", f"note: source audio is {abs(diff):.3f} s {'longer' if diff > 0 else 'shorter'} "
+                             f"than the video", key=KEY)
     rp = data.get("reproducibility") or {}
     if rp:
         L.append("")
@@ -741,6 +774,7 @@ def render(data, short=False):
     L += textwrap.wrap(
         f"Report by Pertineo VFX {data.get('generator', {}).get('version', '?')} · collected "
         f"{_date(data.get('generated'))} · {g.get('nodes_executed', '?')} of {g.get('nodes_in_prompt', '?')} "
-        f"nodes contributed to the output; bypassed and muted nodes are not part of the run. "
+        f"nodes contributed to the output; bypassed and muted nodes and the unchosen branch of a switch are not "
+        f"part of the run. "
         f"Machine-readable version: the .audit.json with the same name (when write_json is on).", WIDTH)
     return "\n".join(L).rstrip() + "\n"

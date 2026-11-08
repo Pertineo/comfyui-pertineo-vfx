@@ -41,6 +41,10 @@ IF_EXISTS = ["error", "overwrite"]
 ALPHA_MODES = ["straight", "premultiplied", "auto (EXR premultiplied, others straight)"]
 VIDEO_ALPHA_MODES = ["straight", "premultiplied"]
 VERSION_IN_NAME = ["replace existing (v01 -> v02)", "append (_v001)"]
+# sorted alphabetically – the default is set in Save Media (AUDIO_FORMAT_DEFAULT), not by the first entry
+AUDIO_FORMATS = ["flac (16 bit)", "flac (24 bit)", "mp3 (320 kbit/s, review)", "wav (16 bit)", "wav (24 bit)",
+                 "wav (32 bit float)"]
+AUDIO_FORMAT_DEFAULT = "wav (24 bit)"
 
 _DATE_FMT = {"YYYY-MM-DD": "%Y-%m-%d", "YYYYMMDD": "%Y%m%d", "YYMMDD": "%y%m%d"}
 _DATE_DIR_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}|\d{8}|\d{6})$")
@@ -127,7 +131,7 @@ def base_name(filename, name=None):
     linked = (name or "").strip()
     text = template.replace("{name}", linked or DEFAULT_NAME)
     # a pasted file name: drop the extension and a trailing frame number
-    text = re.sub(r"(\.\d+)?\.(png|exr|tiff?|jpe?g|mov|mp4)$", "", text.strip(), flags=re.I)
+    text = re.sub(r"(\.\d+)?\.(png|exr|tiff?|jpe?g|mov|mp4|wav|flac|mp3)$", "", text.strip(), flags=re.I)
     return clean_name(text) or DEFAULT_NAME
 
 
@@ -514,19 +518,33 @@ def _metadata_file(metadata):
     return path
 
 
-def audio_for_video(audio, n_frames, fps):
-    """ComfyUI AUDIO -> (float32 [channels, samples], sample_rate) of exactly the video's length: longer audio is cut,
-    shorter audio is padded with silence. None if no usable audio."""
+def audio_array(audio):
+    """ComfyUI AUDIO -> (float32 [channels, samples], sample_rate) in full length. None if no usable audio.
+    A batch of several clips: only the first is used (as for the video sound track)."""
     if not isinstance(audio, dict) or audio.get("waveform") is None:
         return None
     wav = audio["waveform"]
-    wav = wav.detach().cpu().numpy() if hasattr(wav, "detach") else np.asarray(wav)
+    wav = wav.detach().cpu().float().numpy() if hasattr(wav, "detach") else np.asarray(wav)
     wav = np.asarray(wav, dtype=np.float32)
     if wav.ndim == 3:
+        if wav.shape[0] > 1:
+            print(f"{LOG} Audio: batch of {wav.shape[0]} clips – only the first one is used.")
         wav = wav[0]
     if wav.ndim == 1:
         wav = wav[None]
+    if wav.ndim != 2 or wav.shape[1] == 0:
+        return None
     rate = int(audio.get("sample_rate") or 48000)
+    return np.ascontiguousarray(wav), rate
+
+
+def audio_for_video(audio, n_frames, fps):
+    """ComfyUI AUDIO -> (float32 [channels, samples], sample_rate) of exactly the video's length: longer audio is cut,
+    shorter audio is padded with silence. None if no usable audio."""
+    got = audio_array(audio)
+    if got is None:
+        return None
+    wav, rate = got
     want = max(1, int(round(n_frames / float(fps) * rate)))
     if wav.shape[1] < want:
         wav = np.pad(wav, ((0, 0), (0, want - wav.shape[1])))
@@ -540,6 +558,237 @@ def _audio_file(audio):
     with os.fdopen(fd, "wb") as f:
         f.write(np.ascontiguousarray(wav.T, dtype="<f4").tobytes())
     return path
+
+
+# --------------------------------------------------------------------------
+# Audio file (WAV without any dependency, FLAC through ffmpeg)
+# --------------------------------------------------------------------------
+def audio_ext(fmt):
+    f = str(fmt)
+    return ".flac" if f.startswith("flac") else ".mp3" if f.startswith("mp3") else ".wav"
+
+
+def _audio_bits(fmt):
+    return 32 if "32" in fmt else (16 if "16" in fmt else 24)
+
+
+def audio_stats(sound):
+    """Duration, channels, sample rate and peak level of (wav, rate) – for the audit report and the log."""
+    wav, rate = sound
+    peak = float(np.max(np.abs(wav))) if wav.size else 0.0
+    return {"sample_rate": int(rate), "channels": int(wav.shape[0]), "samples": int(wav.shape[1]),
+            "duration_sec": round(wav.shape[1] / float(rate), 3),
+            "peak_dbfs": round(20.0 * np.log10(peak), 2) if peak > 0 else None,
+            "over_full_scale": int(np.count_nonzero(np.abs(wav) > 1.0))}
+
+
+def duration_text(sec):
+    m, s = divmod(float(sec), 60.0)
+    return f"{int(m)}:{s:06.3f}" if m else f"{s:.3f} s"
+
+
+def _pcm_int(wav, bits):
+    """float [-1, 1] -> interleaved little-endian PCM bytes (16 or 24 bit). Values beyond full scale are clipped."""
+    x = np.ascontiguousarray(np.clip(wav.T, -1.0, 1.0))
+    if bits == 16:
+        return np.round(x * 32767.0).astype("<i2").tobytes()
+    v = np.round(x * 8388607.0).astype("<i4")
+    b = v.view(np.uint8).reshape(-1, 4)[:, :3]  # little-endian: the low three bytes
+    return np.ascontiguousarray(b).tobytes()
+
+
+def write_wav(path, sound, bits=24, overwrite=False):
+    """RIFF WAV: 16 / 24 bit integer PCM or 32 bit IEEE float (keeps values above 0 dBFS). Mono / stereo use the
+    plain header every tool reads; more than two channels use WAVE_FORMAT_EXTENSIBLE."""
+    import struct
+    wav, rate = sound
+    ch, n = int(wav.shape[0]), int(wav.shape[1])
+    is_float = bits == 32
+    data = np.ascontiguousarray(wav.T, dtype="<f4").tobytes() if is_float else _pcm_int(wav, bits)
+    block = ch * bits // 8
+    if len(data) > 0xFFFFFFFF - 100:
+        raise IOError(f"{LOG} Audio: {os.path.basename(path)} would be larger than 4 GB – too long for WAV, use FLAC.")
+    tag = 3 if is_float else 1
+    if ch > 2:
+        sub = (b"\x03\x00\x00\x00" if is_float else b"\x01\x00\x00\x00") + \
+              b"\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71"
+        mask = (1 << ch) - 1 if ch <= 18 else 0
+        fmt = struct.pack("<HHIIHHHHI", 0xFFFE, ch, rate, rate * block, block, bits, 22, bits, mask) + sub
+    else:
+        fmt = struct.pack("<HHIIHH", tag, ch, rate, rate * block, block, bits)
+        if is_float:
+            fmt += struct.pack("<H", 0)
+    chunks = b"fmt " + struct.pack("<I", len(fmt)) + fmt
+    if is_float or ch > 2:
+        chunks += b"fact" + struct.pack("<II", 4, n)
+    chunks += b"data" + struct.pack("<I", len(data))
+    pad = b"\x00" if len(data) % 2 else b""
+    with open(path, "wb" if overwrite else "xb") as f:
+        f.write(b"RIFF" + struct.pack("<I", 4 + len(chunks) + len(data) + len(pad)) + b"WAVE")
+        f.write(chunks)
+        f.write(data)
+        f.write(pad)
+
+
+def write_flac(path, sound, bits=24, overwrite=False, metadata=None, codec=None):
+    """Lossless FLAC through ffmpeg (16 or 24 bit; FLAC has no float – values beyond full scale are clipped).
+    codec: other ffmpeg output arguments instead (used for MP3)."""
+    exe = ffmpeg_path()
+    kind = "MP3" if codec else "FLAC"
+    if not exe:
+        raise IOError(f"{LOG} {kind} needs ffmpeg (Linux Mint / Ubuntu: sudo apt install ffmpeg) – or choose WAV, "
+                      f"which needs nothing.")
+    wav, rate = sound
+    src = _audio_file((np.clip(wav, -1.0, 1.0), rate))
+    meta_path = _metadata_file(metadata) if metadata else None
+    try:
+        cmd = [exe, "-hide_banner", "-loglevel", "error", "-y" if overwrite else "-n",
+               "-f", "f32le", "-ar", str(rate), "-ac", str(wav.shape[0]), "-i", src]
+        if meta_path:
+            cmd += ["-f", "ffmetadata", "-i", meta_path, "-map", "0:a", "-map_metadata", "1"]
+        cmd += (codec or ["-c:a", "flac", "-compression_level", "8",
+                          "-sample_fmt", "s16" if bits == 16 else "s32", "-bits_per_raw_sample", str(bits)]) + [path]
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0:
+            raise IOError(f"{LOG} {kind} could not be written: {path}\n"
+                          + proc.stderr.decode("utf-8", "replace").strip()[-400:])
+    finally:
+        for tmp in (src, meta_path):
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+
+def write_audio(path, sound, fmt, overwrite=False, metadata=None):
+    """Writes (wav, rate) as WAV, FLAC or MP3. The WAV carries no workflow (no portable tag for that); FLAC gets it
+    as Vorbis comments, MP3 as ID3 tags, when metadata is given."""
+    bits = _audio_bits(fmt)
+    if path.lower().endswith(".mp3"):  # review copy: LAME at 320 kbit/s CBR, ID3v2.3 tags (widest support)
+        write_flac(path, sound, overwrite=overwrite, metadata=metadata,
+                   codec=["-c:a", "libmp3lame", "-b:a", "320k", "-id3v2_version", "3"])
+    elif path.lower().endswith(".flac"):
+        write_flac(path, sound, 16 if bits == 16 else 24, overwrite, metadata)
+    else:
+        write_wav(path, sound, bits, overwrite)
+
+
+RULER_H = 24  # height of the time ruler under the waveform
+
+
+def _ruler_font(size=13):
+    from PIL import ImageFont
+    for name in ("DejaVuSansMono.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                 "LiberationMono-Regular.ttf", "Menlo.ttc", "consola.ttf", "cour.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _tick_step(duration, width):
+    """Seconds between labelled ticks: about one label every 110 px."""
+    want = duration / max(1.0, width / 110.0)
+    for step in (0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600):
+        if step >= want:
+            return step
+    return 3600
+
+
+def _time_label(sec, step):
+    m, s = divmod(sec, 60.0)
+    if step < 1:
+        return f"{int(m)}:{s:04.1f}" if m else f"{s:.1f}s"
+    return f"{int(m)}:{int(round(s)):02d}"
+
+
+def waveform_image(sound, width=1280, height=320, ruler=True):
+    """HxWx3 float image of the waveform (min / max per column, channels stacked, peaks above 0 dBFS in red) with a
+    time ruler at the bottom – for the player on the node and the PDF thumbnail of an audio-only output."""
+    wav, rate = sound
+    ch = max(1, min(int(wav.shape[0]), 8))
+    wave_h = height - (RULER_H if ruler else 0)
+    img = np.full((height, width, 3), 0.11, np.float32)
+    lane = wave_h / ch
+    n = wav.shape[1]
+    edges = np.linspace(0, n, width + 1).astype(np.int64)
+    for c in range(ch):
+        x = wav[c]
+        top, mid = int(c * lane), (c + 0.5) * lane
+        img[int(mid), :, :] = 0.25  # zero line
+        if c:
+            img[top, :, :] = 0.2  # line between channels
+        for col in range(width):
+            a, b = edges[col], max(edges[col] + 1, edges[col + 1])
+            seg = x[a:min(b, n)]
+            if seg.size == 0:
+                continue
+            lo, hi = float(np.clip(seg.min(), -1, 1)), float(np.clip(seg.max(), -1, 1))
+            y0 = int(np.clip(mid - hi * lane * 0.45, top, top + lane - 1))
+            y1 = int(np.clip(mid - lo * lane * 0.45, top, top + lane - 1))
+            img[y0:y1 + 1, col] = (0.42, 0.75, 0.95)
+            if np.max(np.abs(seg)) > 1.0:  # beyond full scale: red
+                img[y0:y1 + 1, col] = (0.95, 0.35, 0.3)
+    if not ruler:
+        return img
+    from PIL import Image, ImageDraw
+    pil = Image.fromarray(np.clip(img * 255.0 + 0.5, 0, 255).astype(np.uint8))
+    d = ImageDraw.Draw(pil)
+    duration = n / float(rate)
+    d.rectangle([0, wave_h, width, height], fill=(20, 20, 20))
+    d.line([0, wave_h, width, wave_h], fill=(70, 70, 70))
+    step = _tick_step(duration, width)
+    minor = step / 5.0
+    font = _ruler_font()
+    k = 0
+    while k * minor <= duration + 1e-9:
+        t = k * minor
+        x = min(width - 1, int(round(t / duration * width))) if duration > 0 else 0
+        major = k % 5 == 0
+        d.line([x, wave_h, x, wave_h + (8 if major else 4)], fill=(150, 150, 150) if major else (90, 90, 90))
+        if major:
+            label = _time_label(t, step)
+            tw = d.textlength(label, font=font)
+            if x + 3 + tw < width - 2:
+                d.text((x + 3, wave_h + 6), label, font=font, fill=(185, 185, 185))
+        k += 1
+    return np.asarray(pil, dtype=np.float32) / 255.0
+
+
+def write_preview_audio(path, sound, image, fps=12):
+    """Small mp4 for the player on the node: the waveform (with its time ruler) as picture, a playhead line running
+    along with the sound (AAC)."""
+    exe = ffmpeg_path()
+    if not exe:
+        raise IOError("ffmpeg not found")
+    from PIL import Image
+    fd, png = tempfile.mkstemp(prefix="pertineo_wave_", suffix=".png")
+    os.close(fd)
+    Image.fromarray(np.clip(image * 255.0 + 0.5, 0, 255).astype(np.uint8)).save(png)
+    src = _audio_file((np.clip(sound[0], -1.0, 1.0), sound[1]))
+    duration = max(1e-3, sound[0].shape[1] / float(sound[1]))
+    h = image.shape[0]
+    # the playhead: a 2-px line moved by the overlay filter (evaluated per frame, t = time in seconds)
+    fc = (f"color=c=white@0.9:s=2x{h}:r={fps}[ph];"
+          f"[0:v][ph]overlay=x='min(W-w,t/{duration:.6f}*W)':y=0:eval=frame:shortest=0,format=yuv420p[v]")
+    try:
+        cmd = [exe, "-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-framerate", str(fps), "-i", png,
+               "-f", "f32le", "-ar", str(sound[1]), "-ac", str(sound[0].shape[0]), "-i", src,
+               "-filter_complex", fc, "-map", "[v]", "-map", "1:a",
+               "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+               "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-shortest", "-movflags", "+faststart", path]
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0:
+            raise IOError(proc.stderr.decode("utf-8", "replace")[-300:])
+        return path
+    finally:
+        for tmp in (png, src):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def write_video(path, frames, fps, quality, is_mask=False, overwrite=False, metadata=None, audio=None,

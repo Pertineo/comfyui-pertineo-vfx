@@ -75,7 +75,8 @@ def _save_preview(image, frame, max_size=768, label=None):
 # --------------------------------------------------------------------------
 # Load Image Sequence
 # --------------------------------------------------------------------------
-LOADER_PREVIEW = ["still frame", "video"]
+# "video" was the name of "player" up to 1.5.0 – still accepted, so saved workflows keep working
+LOADER_PREVIEW = ["still frame", "player"]
 
 
 class PertineoLoadImageSequence:
@@ -130,7 +131,7 @@ class PertineoLoadImageSequence:
             "optional": {  # 1.5.0 – optional and last, so 1.4.x workflows keep their values
                 "preview_type": (LOADER_PREVIEW, {
                     "tooltip": "With show_preview on: still frame = the labelled middle frame (default, instant). "
-                               "video = a player with a small H.264 copy of the loaded range (max. 540 px high, in "
+                               "player = a small H.264 copy of the loaded range to play on the node (max. 540 px high, in "
                                "ComfyUI's temp folder) – takes a moment longer for long sequences."}),
                 "preview_fps": ("FLOAT", {"advanced": True, "default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001,
                     "tooltip": "Playback speed of the video preview only – the loaded frames are not affected."}),
@@ -138,9 +139,11 @@ class PertineoLoadImageSequence:
         }
 
     @classmethod
-    def VALIDATE_INPUTS(cls, folder=None, first_frame=None, last_frame=None):
+    def VALIDATE_INPUTS(cls, folder=None, first_frame=None, last_frame=None, preview_type=None):
         # Inputs connected to other nodes are not known yet at validation time (None) –
         # those checks are done when the node runs.
+        if preview_type is not None and preview_type not in LOADER_PREVIEW + ["video"]:  # "video" = up to 1.5.0
+            return f"preview_type: '{preview_type}' is not one of {', '.join(LOADER_PREVIEW)}"
         if folder is None:
             return True
         err = check_sequence_folder(folder, "SEQUENCE")
@@ -236,7 +239,7 @@ class PertineoLoadImageSequence:
         result = (images, masks, wanted[0], len(wanted), folder, folder_root_for(folder, seq_name), seq_name)
         if not show_preview:
             return result
-        if preview_type == "video" and len(images) > 1:
+        if preview_type in ("player", "video") and len(images) > 1:
             try:
                 name = f"pertineo_seq_preview_{uuid.uuid4().hex[:10]}.mp4"
                 write_preview_video(os.path.join(folder_paths.get_temp_directory(), name), images,

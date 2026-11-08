@@ -72,12 +72,17 @@ def inactive_nodes(graph, executed, wf_nodes, show):
                 files.append(show.path(v))
         out.append({"node_id": nid, "node_type": n.get("type", "?"), "title": n.get("title"), "state": state,
                     "model_files": files})
+    try:  # 1.6.0: nodes only on the branch a switch did not choose
+        wired = set(graph.executed_ids(follow_switches=False))
+    except Exception:
+        wired = set()
     for nid in graph.nodes:
         if nid in exe or _mode_name(wf_nodes.get(nid, {}).get("mode")) or \
                 graph.ctype(nid).startswith(("PertineoCollectMetadata", "PertineoProductionContext")):
             continue
         out.append({"node_id": nid, "node_type": graph.ctype(nid), "title": graph.title(nid),
-                    "state": "not connected to an output", "model_files": []})
+                    "state": "not run – the switch chose the other branch" if nid in wired
+                    else "not connected to an output", "model_files": []})
     def key(x):
         return (x["state"], [(0, int(p), "") if p.isdigit() else (1, 0, p) for p in str(x["node_id"]).split(":")])
     return sorted(out, key=key)
@@ -736,9 +741,10 @@ def workflow_for_json(prompt, extra_pnginfo):
 # --------------------------------------------------------------------------
 _SETTINGS_RE = re.compile(r"controlnet|control_net|ipadapter|ip_adapter|upscale|scale|resize|mask|grow|blur|feather|"
                           r"crop|inpaint|pad|outpaint|detailer|interpolat|fps|frame|tile|denoise|stylemodel|"
-                          r"instantid|pulid|reactor|faceswap|facerestore|colormatch|color_match|trimap|vitmatte", re.I)
+                          r"instantid|pulid|reactor|faceswap|facerestore|colormatch|color_match|trimap|vitmatte|"
+                          r"music\w*encode", re.I)  # 1.6.0: music encoders generate (seed, duration, cfg, top_k)
 _SETTING_SKIP = re.compile(r"image|images|pixels|samples|latent|model|clip|vae|conditioning|positive|negative|"
-                           r"mask$|control_net$|text$|prompt", re.I)
+                           r"mask$|control_net$|text$|prompt|caption|lyrics|^tags$", re.I)
 
 
 def node_settings(graph, executed, show, warn):
@@ -751,6 +757,8 @@ def node_settings(graph, executed, show, warn):
             continue  # their content is in the report already (author respects include_author)
         vals = {}
         for name, raw in graph.inputs(nid).items():
+            if name.endswith("-preview"):  # 1.6.0: e.g. 'video-preview' – a frontend player widget, not a setting
+                continue
             ok, val, _n, _c = graph.resolve(raw)
             if not ok or not isinstance(val, (str, int, float, bool)) or isinstance(raw, dict):
                 continue
@@ -778,6 +786,29 @@ _OUT_KEY_RE = re.compile(r"prefix|format|folder|path|quality|fps|frame_rate|code
                          r"pix_fmt|container|extension|embed|metadata", re.I)
 
 
+def _save_media_used(ins, settings):
+    """1.6.0: Save Media has settings for every kind of output – keep only those of the outputs it wrote
+    (no sequence settings for a music file, no workflow embedding for a WAV)."""
+    from .collect import is_link
+    on = lambda k: ins.get(k, True) is not False
+    imgs, mask, audio = (is_link(ins.get(k)) for k in ("images", "mask", "audio"))
+    video_of = str(ins.get("video_of", "image"))
+    vid = on("video_write") and ins.get("video_write") is not None and \
+        ((imgs and not video_of.startswith("mask")) or (mask and video_of != "image"))
+    use = {"seq_": imgs and on("seq_write"), "mask_": mask and on("mask_write"), "video_": vid,
+           "audio_": audio and on("audio_write")}
+    fmt = str(ins.get("audio_format", ""))
+    keep = {}
+    for k, v in settings.items():
+        group = next((g for g in use if k.startswith(g)), None)
+        if group and not use[group]:
+            continue
+        if k == "meta_embed_workflow" and not (vid or (use["audio_"] and fmt.startswith(("flac", "mp3")))):
+            continue
+        keep[k] = v
+    return keep
+
+
 def output_nodes(graph, executed, show):
     out = []
     for nid in executed:
@@ -791,6 +822,8 @@ def output_nodes(graph, executed, show):
             ok, val, _n, _c = graph.resolve(raw)
             if ok and isinstance(val, (str, int, float, bool)) and _OUT_KEY_RE.search(name):
                 settings[name] = show.text(val) if isinstance(val, str) else val
+        if ct == "PertineoSaveMedia":
+            settings = _save_media_used(graph.inputs(nid), settings)
         out.append({"node_id": nid, "node_type": ct, "settings": settings})
     return out
 
@@ -867,6 +900,8 @@ def classify(graph, executed, models, samplers, api_nodes):
         elif any(_conditioning_has_image(graph, sins.get(k)) for k in ("positive", "negative", "guider")):
             # 1.4.3: an empty latent with the image in the conditioning is an edit, not text-to-image
             found.append("image-conditioned video" if is_video else "image edit (image in the conditioning)")
+        elif "audio" in src:  # 1.6.0: audio latents (e.g. EmptyAceStepLatentAudio, VAEEncodeAudio)
+            found.append("text-to-audio" if "empty" in src else "audio-to-audio")
         elif "empty" in src:
             found.append("text-to-video" if is_video else "text-to-image")
         elif lat.get("same_as") or "vaeencode" in src or "encoded" in (lat.get("note") or ""):
@@ -874,6 +909,8 @@ def classify(graph, executed, models, samplers, api_nodes):
     for label, pat in _TYPE_RULES:
         if re.search(pat, text):
             found.append(label)
+    if any(f.endswith("-to-audio") for f in found):  # 1.6.0: music – 'voice / lip-sync' would mislead
+        found = [f for f in found if f != "audio / voice / lip-sync"]
     if any(m["role"] == "lora" for m in models):
         found.append("LoRA-assisted")
     if is_video and not any("video" in f for f in found):
@@ -946,11 +983,11 @@ def reproducibility(data):
         w = re.sub(r" #[\w:]+$", "", w)
         rerun.append(f"the prompt is written in each run by {w} – running the workflow "
                      f"again writes a new prompt "
-                     f"(LLM / VLM output is not deterministic); the prompt recorded here reproduces this image")
+                     f"(LLM / VLM output is not deterministic); the prompt recorded here reproduces this output")
     sm = (data.get("seed_mode") or {}).get("mode")
     if sm and sm != "fixed":
         rerun.append(f"seed control is '{sm}' – running the workflow again uses a new seed; the seed recorded here "
-                     f"reproduces this image")
+                     f"reproduces this output")
     if data.get("api_nodes") or any("file not found" in str(m.get("sha256", "")) for m in data.get("models") or []):
         status = "not reproducible"
     elif missing:

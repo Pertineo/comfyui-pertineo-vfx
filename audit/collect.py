@@ -239,9 +239,10 @@ class Graph:
         except Exception:
             return False
 
-    def executed_ids(self):
+    def executed_ids(self, follow_switches=True):
         """Nodes that contribute to an output node (what ComfyUI actually runs).
-        Without class information every node in the prompt is used."""
+        Without class information every node in the prompt is used. follow_switches=False also walks the branch a
+        lazy switch did not choose (to tell such nodes apart from unconnected ones)."""
         outs = [n for n in self.nodes if self.is_output_node(self.ctype(n))]
         if not outs:
             return sorted(self.nodes, key=_id_key)
@@ -251,10 +252,34 @@ class Graph:
             if n in seen or n not in self.nodes:
                 continue
             seen.add(n)
-            for v in self.inputs(n).values():
-                if is_link(v):
+            skip = self._unused_branch(n) if follow_switches else None
+            for k, v in self.inputs(n).items():
+                if is_link(v) and k != skip:
                     stack.append(v[0])
         return sorted(seen, key=_id_key)
+
+    _LAZY_SWITCHES = {"ComfySwitchNode"}  # core If/Else Switch: on_true / on_false are lazy
+
+    def _unused_branch(self, nid):
+        """1.6.0: a switch with lazy inputs (ComfyUI's If/Else Switch) runs only the chosen branch – the other one
+        does not contribute. Returns the input name of the branch that is NOT run, or None."""
+        ins = self.inputs(nid)
+        key = "switch" if "switch" in ins else "boolean" if "boolean" in ins else None
+        if key is None or not {"on_true", "on_false"} <= set(ins):
+            return None
+        lazy = self.ctype(nid) in self._LAZY_SWITCHES
+        if not lazy:
+            try:
+                spec = self.cls(self.ctype(nid)).INPUT_TYPES()
+                opts = {**(spec.get("required") or {}), **(spec.get("optional") or {})}
+                lazy = all(isinstance(opts.get(k), (list, tuple)) and len(opts[k]) > 1 and
+                           isinstance(opts[k][1], dict) and opts[k][1].get("lazy") for k in ("on_true", "on_false"))
+            except Exception:
+                lazy = False
+        if not lazy:
+            return None
+        ok, b, _n, _c = self.resolve(ins[key])
+        return ("on_false" if b else "on_true") if ok and isinstance(b, bool) else None
 
     def label(self, nid):
         return f"{self.ctype(nid)} #{nid}"
@@ -1570,7 +1595,8 @@ PARAM_KEYS = ["seed", "noise_seed", "steps", "cfg", "guidance", "sampler_name", 
               "base_shift", "max_tokens"]
 _DISPLAY_KEY = {"noise_seed": "seed", "sampler_name": "sampler"}
 _TEXT_KEYS = ("text", "text_g", "text_l", "prompt", "t5xxl", "clip_l", "clip_g", "llama", "system_prompt",
-              "user_prompt", "positive_prompt", "negative_prompt")
+              "user_prompt", "positive_prompt", "negative_prompt",
+              "caption", "tags", "lyrics")  # 1.6.0: music models (MiniMax Music: caption + lyrics, ACE-Step: tags)
 _TRACE_SKIP = {"model", "clip", "vae", "image", "images", "pixels", "samples", "latent", "latent_image",
                "control_net", "mask", "noise", "sigmas", "sampler", "clip_vision", "clip_vision_output",
                "style_model", "upscale_model", "ipadapter", "audio", "video"}
@@ -1756,6 +1782,19 @@ def latent_info(graph, nid, source_link=None):
                     r = graph.resolve(sins[k])
                     info[k] = r[1] if r[0] else r[2]
             return info
+        if "seconds" in sins:  # 1.6.0: empty audio latent (EmptyAceStepLatentAudio, EmptyLatentAudio …)
+            r = graph.resolve(sins["seconds"])
+            info = {"from": graph.label(src), "audio": True}
+            if r[0]:
+                info["audio_seconds"] = r[1]
+            else:
+                info["note"] = r[2]
+            if "batch_size" in sins:
+                b = graph.resolve(sins["batch_size"])
+                info["batch_size"] = b[1] if b[0] else b[2]
+            return info
+        if is_link(sins.get("audio")) and not ("pixels" in sins or "image" in sins):  # e.g. VAEEncodeAudio
+            return {"from": graph.label(src), "audio": True, "note": "encoded from audio (length of that audio)"}
         if "pixels" in sins or "image" in sins:
             px = sins.get("pixels", sins.get("image"))
             if source_link is not None and px == source_link:
@@ -1830,6 +1869,21 @@ def image_info(t):
         return None
 
 
+def audio_info(audio):
+    """Duration, sample rate and channels of a ComfyUI AUDIO ({'waveform': [batch, channels, samples], ...})."""
+    try:
+        wav = audio["waveform"]
+        rate = int(audio.get("sample_rate") or 0)
+        b, ch, n = int(wav.shape[0]), int(wav.shape[1]), int(wav.shape[-1])
+        info = {"sample_rate": rate, "channels": ch, "samples": n,
+                "duration_sec": round(n / rate, 3) if rate else None}
+        if b > 1:
+            info["clips"] = b
+        return info
+    except Exception:
+        return None
+
+
 def resolution(source_image, output_image, fps, samplers):
     res = {"source": image_info(source_image) if source_image is not None else None,
            "final": image_info(output_image) if output_image is not None else None,
@@ -1852,7 +1906,7 @@ def resolution(source_image, output_image, fps, samplers):
 # --------------------------------------------------------------------------
 def collect(prompt, extra_pnginfo, unique_id, manual, compute_model_hashes, model_info_file,
             include_full_paths, source_image=None, output_image=None, fps=0.0, execution_list=None,
-            production_context=None):
+            production_context=None, output_audio=None, source_audio=None):
     warnings = []
     show = PathDisplay(include_full_paths)
 
@@ -1908,6 +1962,10 @@ def collect(prompt, extra_pnginfo, unique_id, manual, compute_model_hashes, mode
             warn(f"{s['node_type']} #{s['node_id']}: {k} not resolvable to a constant ({note})")
     data["resolution"], data["video"] = section(
         "Resolution", lambda: resolution(source_image, output_image, fps, data["sampling"]), ({}, None))
+    if output_audio is not None:  # 1.6.0: the generated sound (audio-only workflows)
+        data["audio"] = audio_info(output_audio)
+    if source_audio is not None:  # 1.6.0: sound given into the workflow (e.g. audio track for a video model)
+        data["source_audio"] = audio_info(source_audio)
 
     # ---- 1.2.0: second pass + assessment ------------------------------------------
     from . import assess as A

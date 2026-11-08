@@ -247,6 +247,8 @@
         24.0,
         "straight",
         "only if connected",
+        true,
+        "wav (24 bit)",
         "error",
         true,
         true,
@@ -254,7 +256,7 @@
         true,
         false,
         true,
-        "video"
+        "player"
       ]
     },
     {
