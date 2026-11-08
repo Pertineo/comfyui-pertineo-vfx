@@ -3,6 +3,14 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.6.1 – 2026-11-08
+
+### Fixed
+- **Save Media – MP3:** the workflow could not be loaded by dragging the MP3 into ComfyUI. The tags are now written
+  as ID3v2.4 (UTF-8), like ComfyUI's own MP3 saver; with ID3v2.3 a workflow with non-ASCII characters was stored as
+  UTF-16, which the frontend does not read. The `audio_format` tooltip now says which formats carry the workflow
+  (FLAC, MP3 – not WAV).
+
 ## 1.6.0 – 2026-11-08
 
 ### Added

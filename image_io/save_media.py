@@ -165,7 +165,8 @@ class PertineoSaveMedia:
                                "clips above 0 dBFS like every integer format). mp3 320 kbit/s = small review copy "
                                "to send around, lossy and not sample-exact (the encoder adds a few ms of padding) – "
                                "not for delivery or sync (needs ffmpeg with libmp3lame). The report "
-                               "notes clipped samples."}),
+                               "notes clipped samples. The workflow is embedded in FLAC and MP3 (drag the file into "
+                               "ComfyUI to load it), not in WAV – there it is in the .workflow.json next to it."}),
                 "if_exists": (M.IF_EXISTS, {"advanced": True,
                     "tooltip": "What to do when the output already exists (only possible with version fixed / off "
                                "or Output Name set to fixed / off): stop with an error (safe) or overwrite."}),

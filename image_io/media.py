@@ -665,9 +665,11 @@ def write_audio(path, sound, fmt, overwrite=False, metadata=None):
     """Writes (wav, rate) as WAV, FLAC or MP3. The WAV carries no workflow (no portable tag for that); FLAC gets it
     as Vorbis comments, MP3 as ID3 tags, when metadata is given."""
     bits = _audio_bits(fmt)
-    if path.lower().endswith(".mp3"):  # review copy: LAME at 320 kbit/s CBR, ID3v2.3 tags (widest support)
+    if path.lower().endswith(".mp3"):
+        # review copy: LAME at 320 kbit/s CBR. ID3v2.4 (UTF-8) like ComfyUI's own MP3 saver – with v2.3 ffmpeg stores
+        # non-ASCII text as UTF-16 and the ComfyUI frontend no longer finds the workflow on drag & drop
         write_flac(path, sound, overwrite=overwrite, metadata=metadata,
-                   codec=["-c:a", "libmp3lame", "-b:a", "320k", "-id3v2_version", "3"])
+                   codec=["-c:a", "libmp3lame", "-b:a", "320k", "-id3v2_version", "4"])
     elif path.lower().endswith(".flac"):
         write_flac(path, sound, 16 if bits == 16 else 24, overwrite, metadata)
     else:
