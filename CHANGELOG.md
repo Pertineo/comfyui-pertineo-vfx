@@ -3,6 +3,17 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.7.0 – 2026-11-08
+
+### Added
+- **Pertineo Frames from Media** (*Pertineo/IO*): frame count for the video model taken from the length of an
+  `images` batch, a `video` (core `VIDEO` type, e.g. ComfyUI's Load Video) or an `audio` track – e.g. a music track
+  decides how long the generated video is. Audio / video: duration × `fps`, rounded up so the whole sound is covered;
+  images: batch size. Same length rules as Frames for Model (LTX 8n+1, Wan 4n+1, MiniMax H3 17n+5, custom), `rounding`
+  *up* by default, `source` picks the input when several are connected (auto = images > video > audio), optional
+  `max_length` (0 = no limit). Outputs `length`, `original_length`, `difference`, `seconds`, `fps`, `first_frame`,
+  `last_frame`.
+
 ## 1.6.1 – 2026-11-08
 
 ### Fixed

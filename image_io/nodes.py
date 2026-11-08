@@ -6,6 +6,7 @@
 
 """Pertineo VFX – I/O nodes (high bit-depth image sequences)."""
 
+import math
 import os
 import time
 import uuid
@@ -581,6 +582,166 @@ class PertineoFitFramesToModel:
         return (out_img, out_mask, out_audio, length, n_src, diff)
 
 
+# --------------------------------------------------------------------------
+# Frames from Media (valid model length from the length of audio, video or an image batch)
+# --------------------------------------------------------------------------
+MEDIA_SOURCES = ["auto (images > video > audio)", "images", "video", "audio"]
+_FRAME_TOLERANCE = 1e-3  # a duration of 5.0004 s at 24 fps still counts as 120 frames, not 121
+
+
+def _frames_for_seconds(seconds, fps):
+    """Frames needed to cover `seconds` at `fps` – rounded up, so nothing of the sound is left out."""
+    return max(1, int(math.ceil(seconds * fps - _FRAME_TOLERANCE)))
+
+
+def _video_info(video):
+    """(frame_count, fps, seconds) of a core VIDEO input (e.g. from ComfyUI's Load Video or an API video node).
+    Uses the cheap getters first and decodes the frames only as a last resort; missing values are None."""
+    count = rate = secs = None
+    try:
+        count = int(video.get_frame_count())
+    except Exception:
+        pass
+    try:
+        rate = float(video.get_frame_rate())
+    except Exception:
+        pass
+    try:
+        secs = float(video.get_duration())
+    except Exception:
+        pass
+    if count is None or rate is None:
+        try:
+            comp = video.get_components()
+            count = int(comp.images.shape[0]) if count is None else count
+            rate = float(comp.frame_rate) if rate is None else rate
+        except Exception:
+            pass
+    if secs is None and count is not None and rate:
+        secs = count / rate
+    return count, rate, secs
+
+
+def _largest_valid(limit, step, offset):
+    """Largest length step * n + offset that is <= limit (at least offset)."""
+    if limit <= offset:
+        return offset
+    return step * ((limit - offset) // step) + offset
+
+
+class PertineoFramesFromMedia:
+    CATEGORY = CATEGORY
+    RETURN_TYPES = ("INT", "INT", "INT", "FLOAT", "FLOAT", "INT", "INT")
+    RETURN_NAMES = ("length", "original_length", "difference", "seconds", "fps", "first_frame", "last_frame")
+    OUTPUT_TOOLTIPS = ("Number of frames for the model (fits the model rule) – connect it to the model's length / "
+                       "frames input and to Empty Audio.",
+                       "Frames the media needs at fps (audio / video: duration x fps, rounded up; images: batch size).",
+                       "length - original_length (positive = frames added, negative = frames cut).",
+                       "Duration of length at fps in seconds.",
+                       "The frame rate used (passed through).",
+                       "First frame number (passed through) – for the loaders and Save Media.",
+                       "first_frame + length - 1 – for the loaders.")
+    FUNCTION = "run"
+    DESCRIPTION = ("Takes the length of an image batch, a video or an audio file and turns it into a frame count the "
+                   "video model accepts – LTX 8n+1, Wan 4n+1, MiniMax H3 17n+5 or a custom rule. Like Frames for "
+                   "Model, but the length comes from the media: e.g. a music track decides how long the generated "
+                   "video is. Audio and video: duration x fps (rounded up, so the whole sound is covered). Only the "
+                   "length is measured – the media itself is not changed (to cut or extend frames use Fit Frames to "
+                   "Model).")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": (list(MODEL_FRAME_RULES.keys()), {
+                    "tooltip": "Video model whose length rule is applied. LTX: 8n+1 (97, 121, ...), "
+                               "Wan: 4n+1 (81, ...), MiniMax H3: 17n+5 (124, ...)."}),
+                "rounding": (ROUNDING, {"default": ROUNDING[1],
+                    "tooltip": "up = the model length covers the whole media (default – cut the extra frames "
+                               "afterwards with original_length). down = never longer than the media. "
+                               "nearest = closest valid length."}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001,
+                    "tooltip": "Frame rate of the video you are going to generate (e.g. 24, 25 or what the model "
+                               "uses). Turns the duration of audio or video into frames. Not used for an image "
+                               "batch (one image = one frame)."}),
+                "source": (MEDIA_SOURCES, {
+                    "tooltip": "Which input decides the length when more than one is connected. auto = images first, "
+                               "then video, then audio."}),
+                "first_frame": ("INT", {"default": 1001, "min": 0, "max": 10_000_000,
+                    "tooltip": "First frame number (e.g. 1001). Passed through; last_frame = first_frame + length - 1."}),
+                "max_length": ("INT", {"advanced": True, "default": 0, "min": 0, "max": 100_000,
+                    "tooltip": "Upper limit in frames for the model (0 = no limit). A longer result is cut to the "
+                               "largest valid length below it – a warning in the console says so."}),
+                "custom_step": ("INT", {"advanced": True, "default": 8, "min": 1, "max": 1000,
+                    "tooltip": "Only for model = custom: length = step * n + offset."}),
+                "custom_offset": ("INT", {"advanced": True, "default": 1, "min": 0, "max": 1000,
+                    "tooltip": "Only for model = custom: length = step * n + offset."}),
+            },
+            "optional": {
+                "images": ("IMAGE", {"tooltip": "Image batch (e.g. from Pertineo Load Video / Load Image Sequence) – "
+                                                "the number of images is the frame count."}),
+                "video": ("VIDEO", {"tooltip": "Video from ComfyUI's Load Video (core VIDEO type) or a video API "
+                                               "node. Its duration x fps gives the frame count (with the same fps "
+                                               "its own frame count is used)."}),
+                "audio": ("AUDIO", {"tooltip": "Audio – e.g. a music track from Load Audio or a music model. Its "
+                                               "duration x fps gives the frame count."}),
+            },
+        }
+
+    def run(self, model, rounding, fps, source, first_frame, max_length, custom_step, custom_offset,
+            images=None, video=None, audio=None):
+        rule = MODEL_FRAME_RULES[model]
+        step, offset = rule if rule is not None else (custom_step, custom_offset)
+        fps = float(fps)
+
+        has_audio = isinstance(audio, dict) and audio.get("waveform") is not None
+        available = {"images": images is not None, "video": video is not None, "audio": has_audio}
+        if source.startswith("auto"):
+            pick = next((k for k in ("images", "video", "audio") if available[k]), None)
+            if pick is None:
+                raise ValueError(f"{LOG} Frames from Media: connect images, video or audio.")
+        else:
+            pick = source
+            if not available[pick]:
+                raise ValueError(f"{LOG} Frames from Media: source is '{pick}', but nothing is connected there.")
+
+        if pick == "audio":
+            rate = int(audio.get("sample_rate") or 0)
+            if rate <= 0:
+                raise ValueError(f"{LOG} Frames from Media: the audio has no sample rate.")
+            secs = int(audio["waveform"].shape[-1]) / float(rate)
+            n_src = _frames_for_seconds(secs, fps)
+            what = f"audio {secs:.3f} s @ {rate} Hz"
+        elif pick == "video":
+            v_count, v_rate, secs = _video_info(video)
+            if v_count is not None and v_rate and abs(v_rate - fps) < 0.01:
+                n_src = v_count
+            elif secs:
+                n_src = _frames_for_seconds(secs, fps)
+            else:
+                raise ValueError(f"{LOG} Frames from Media: could not read the length of the video.")
+            what = (f"video {secs:.3f} s" if secs else "video") + (f", {v_count} frames" if v_count else "") + \
+                   (f" @ {v_rate:g} fps" if v_rate else "")
+            if v_rate and abs(v_rate - fps) >= 0.01:
+                what += f" (counted at {fps:g} fps)"
+        else:
+            n_src = int(images.shape[0])
+            what = f"image batch, {n_src} images"
+
+        length = model_length(n_src, step, offset, rounding)
+        if max_length and length > max_length:
+            capped = _largest_valid(max_length, step, offset)
+            print(f"{LOG} Frames from Media: WARNING – {length} frames are more than max_length {max_length}; "
+                  f"using {capped}. The end of the media is not covered.")
+            length = capped
+        diff = length - n_src
+        last = first_frame + length - 1
+        note = "fits" if diff == 0 else (f"{-diff} frame(s) fewer" if diff < 0 else f"{diff} frame(s) more")
+        print(f"{LOG} Frames from Media: {what} -> {n_src} frames @ {fps:g} fps -> {model}: length {length} "
+              f"({note}), {first_frame}-{last}")
+        return (length, n_src, diff, length / fps, fps, first_frame, last)
+
+
 NODE_CLASS_MAPPINGS = {
     "PertineoLoadImageSequence": PertineoLoadImageSequence,
     "PertineoSaveMatteSequence": PertineoSaveMatteSequence,
@@ -591,6 +752,7 @@ NODE_CLASS_MAPPINGS = {
     "PertineoLoadImage": PertineoLoadImage,
     "PertineoLoadVideo": PertineoLoadVideo,
     "PertineoFitFramesToModel": PertineoFitFramesToModel,
+    "PertineoFramesFromMedia": PertineoFramesFromMedia,
     "PertineoCompare": PertineoCompare,
     "PertineoPreviewFrame": PertineoPreviewFrame,
 }
@@ -604,6 +766,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PertineoLoadImage": "Pertineo Load Image",
     "PertineoLoadVideo": "Pertineo Load Video",
     "PertineoFitFramesToModel": "Pertineo Fit Frames to Model",
+    "PertineoFramesFromMedia": "Pertineo Frames from Media",
     "PertineoCompare": "Pertineo Compare",
     "PertineoPreviewFrame": "Pertineo Preview Frame",
 }
