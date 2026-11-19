@@ -258,14 +258,85 @@ def _picture(path):
 _NONE = {"none", "-", "n/a", "na", "no", "keine", "nichts"}
 
 
+def _exists(p):
+    return os.path.isfile(p) or os.path.isdir(p) or bool(sequence_of(p))
+
+
 def _paths(text):
-    """File paths, one per line – empty lines and 'none' / '-' are skipped."""
+    """File paths, one per line – empty lines and 'none' / '-' are skipped. A path broken over lines (a line break
+    pasted into it) is joined again: a line that does not start with '/' or '~' continues the line before; a line
+    starting with '/' continues it too when the joined path exists and the line before is a folder or does not
+    exist."""
+    lines = [clean_path(x) for x in (text or "").splitlines()]
+    lines = [x for x in lines if x and x.lower() not in _NONE]
     out = []
-    for line in (text or "").splitlines():
-        p = clean_path(line)
-        if p and p.lower() not in _NONE:
-            out.append(os.path.realpath(p))
-    return out
+    for ln in lines:
+        if out:
+            prev = out[-1]
+            cands = [prev + ln, prev.rstrip("/") + "/" + ln.lstrip("/")]
+            if not ln.startswith(("/", "~")):
+                out[-1] = next((c for c in cands if _exists(c)), cands[1])
+                continue
+            if (os.path.isdir(prev) or not _exists(prev)) and not _exists(ln):
+                hit = next((c for c in cands if _exists(c)), None)
+                if hit:
+                    out[-1] = hit
+                    continue
+        out.append(ln)
+    return [os.path.realpath(x) for x in out]
+
+
+_SEQ = (".exr", ".png", ".tif", ".tiff", ".dpx", ".jpg", ".jpeg", ".webp")
+_NUM = re.compile(r"^(.*?)(\d+)(\.[A-Za-z0-9]+)$")
+
+
+def sequence_of(path):
+    """A folder or a pattern (name.####.exr, name.%04d.exr) -> {'folder', 'frames' [file names], 'name', 'pattern',
+    'first', 'last', 'missing'} – None if it is not a sequence."""
+    p = path.rstrip("/")
+    if os.path.isdir(p):
+        folder, rx = p, None
+    else:
+        folder, base = os.path.dirname(p), os.path.basename(p)
+        m = re.search(r"(#+|%0?(\d*)d)", base)
+        if not m or not os.path.isdir(folder):
+            return None
+        pre, post = base[:m.start()], base[m.end():]
+        rx = re.compile("^" + re.escape(pre) + r"(\d+)" + re.escape(post) + "$")
+    names = sorted(f for f in os.listdir(folder) if f.lower().endswith(_SEQ) and (rx is None or rx.match(f)))
+    if not names:
+        return None
+    nums = []
+    for f in names:
+        m = _NUM.match(f)
+        if m:
+            nums.append(int(m.group(2)))
+    first_m = _NUM.match(names[0])
+    pattern = (first_m.group(1) + "#" * len(first_m.group(2)) + first_m.group(3)) if first_m else names[0]
+    first, last = (min(nums), max(nums)) if nums else (None, None)
+    missing = (last - first + 1 - len(set(nums))) if nums else 0
+    return {"folder": folder, "frames": names, "name": os.path.basename(folder), "pattern": pattern,
+            "first": first, "last": last, "missing": missing}
+
+
+def _seq_asset(seq, all_frames=False):
+    """Asset for a sequence: pattern, frame range, size of the first frame and the SHA256 of the first / middle /
+    last frame (all frames with all_frames – needed when the sequence is the result of a declared step)."""
+    fr = seq["frames"]
+    pick = fr if all_frames else list(dict.fromkeys([fr[0], fr[len(fr) // 2], fr[-1]]))
+    hashes = {}
+    for i, f in enumerate(pick):
+        if all_frames and i % 50 == 0:
+            print(f"{LOG} Audit External Step: hashing {seq['name']} frame {i + 1} / {len(pick)}")
+        hashes[f] = hashing.sha256_file(os.path.join(seq["folder"], f), label=f)[0]
+    d = {"file": os.path.join(seq["folder"], seq["pattern"]), "role": "image sequence", "path": seq["folder"],
+         "files_in_folder": len(fr), "first_frame": seq["first"], "last_frame": seq["last"],
+         "missing_frames": seq["missing"], "frame_sha256": hashes,
+         "sha256": hashes[fr[len(fr) // 2]] if fr[len(fr) // 2] in hashes else next(iter(hashes.values()))}
+    wh = _dims(os.path.join(seq["folder"], fr[0]))
+    if wh:
+        d["width"], d["height"] = wh
+    return d
 
 
 def _report_for(path):
@@ -362,8 +433,8 @@ class PertineoAuditExternalStep:
         p = clean_path(file)
         if not p:
             return "Audit External Step: enter the file (or the report to amend)."
-        if not os.path.isfile(p):
-            return f"Audit External Step: file not found: {p}"
+        if not os.path.isfile(p) and not sequence_of(p):
+            return f"Audit External Step: file not found: {p} (a sequence: give its folder or name.####.exr)"
         return True
 
     def run(self, mode, file, source_files, step, purpose, software, changes, origin_and_rights, author="",
@@ -412,13 +483,27 @@ class PertineoAuditExternalStep:
                                  "it is not replaced. Use mode 'amend report' to add declarations to it.")
         sources = []
         for sp in _paths(source_files):
-            if not os.path.isfile(sp):
-                raise ValueError(f"{LOG} Audit External Step: source file not found: {sp}")
-            if sp == path:
+            if os.path.isfile(sp):
+                if sp != path:
+                    sources.append(_asset(sp))
                 continue
-            sources.append(_asset(sp))
-        me = _asset(path)
-        st = os.stat(path)
+            sq = sequence_of(sp)
+            if not sq:
+                raise ValueError(f"{LOG} Audit External Step: source file not found: {sp}")
+            sources.append(_seq_asset(sq))
+        seq = None if os.path.isfile(path) else sequence_of(path)
+        if seq:  # the result is an image sequence: the report goes next to its folder, every frame is hashed
+            rpath = os.path.join(os.path.dirname(seq["folder"]), seq["name"] + ".audit.json")
+            if os.path.isfile(rpath):
+                old = CH.load_report(rpath)
+                if old is not None and old.get("kind") != CH.EXTERNAL:
+                    raise ValueError(f"{LOG} Audit External Step: {os.path.basename(rpath)} is a ComfyUI audit report "
+                                     "– it is not replaced. Use mode 'amend report' to add declarations to it.")
+            me = _seq_asset(seq, all_frames=True)
+            st = os.stat(os.path.join(seq["folder"], seq["frames"][0]))
+        else:
+            me = _asset(path)
+            st = os.stat(path)
         manual = {}
         for key, field in FIELDS:
             if key in vals:
@@ -435,19 +520,33 @@ class PertineoAuditExternalStep:
             "generated": _now(),
             "statement": "Declared by the user – work outside ComfyUI, not recorded by ComfyUI.",
             "manual": manual,
-            "file": {"name": os.path.basename(path), "folder": os.path.dirname(path),
-                     "format": os.path.splitext(path)[1].lstrip(".").lower(), "sha256": me["sha256"],
-                     "width": me.get("width"), "height": me.get("height"),
-                     "saved": datetime.datetime.fromtimestamp(st.st_mtime).astimezone().isoformat(timespec="seconds"),
-                     "bytes": st.st_size, **({"camera": me["camera"]} if me.get("camera") else {})},
+            "file": ({"name": seq["name"], "folder": os.path.dirname(seq["folder"]), "format": "image sequence",
+                      "width": me.get("width"), "height": me.get("height"),
+                      "saved": datetime.datetime.fromtimestamp(st.st_mtime).astimezone().isoformat(timespec="seconds"),
+                      "first_frame": seq["first"], "last_frame": seq["last"], "frame_count": len(seq["frames"]),
+                      "missing_frames": seq["missing"],
+                      "outputs": [{"kind": "image sequence", "path": f"{seq['name']}/{seq['pattern']}",
+                                   "frames": len(seq["frames"]), "first_frame": seq["first"],
+                                   "last_frame": seq["last"]}],
+                      "checksum_list": {f"{seq['name']}/{k}": v for k, v in me["frame_sha256"].items()}}
+                     if seq else
+                     {"name": os.path.basename(path), "folder": os.path.dirname(path),
+                      "format": os.path.splitext(path)[1].lstrip(".").lower(), "sha256": me["sha256"],
+                      "width": me.get("width"), "height": me.get("height"),
+                      "saved": datetime.datetime.fromtimestamp(st.st_mtime).astimezone().isoformat(timespec="seconds"),
+                      "bytes": st.st_size, **({"camera": me["camera"]} if me.get("camera") else {})}),
             "input_assets": sources,
         }
         with open(rpath, "w", encoding="utf-8", newline="\n") as f:
             json.dump(rep, f, indent=2, ensure_ascii=False)
-        L = [f"EXTERNAL STEP – {os.path.basename(path)}", "",
+        L = [f"EXTERNAL STEP – {seq['name'] if seq else os.path.basename(path)}", "",
              f"{'Declared':<18}{rep['generated'][:16].replace('T', ' ')}" + (f" by {author}" if author else ""),
-             f"{'File':<18}{path}",
-             f"{'SHA256':<18}{me['sha256']}"]
+             f"{'File':<18}{me['file'] if seq else path}"]
+        if seq:
+            L.append(f"{'Frames':<18}{seq['first']}–{seq['last']} ({len(seq['frames'])} frames"
+                     + (f", {seq['missing']} missing" if seq["missing"] else "") + ") · SHA256 of every frame recorded")
+        else:
+            L.append(f"{'SHA256':<18}{me['sha256']}")
         if me.get("width"):
             L.append(f"{'Size':<18}{me['width']}x{me['height']}")
         if me.get("camera"):
@@ -457,7 +556,9 @@ class PertineoAuditExternalStep:
         if notes:
             L.append(f"{'Notes':<18}{notes}")
         for a in sources:
-            L.append(f"{'Source':<18}{a['file']}  (sha256 {a['sha256'][:16]})")
+            rng = (f"  frames {a['first_frame']}–{a['last_frame']} ({a['files_in_folder']})"
+                   if a.get("role") == "image sequence" else f"  (sha256 {a['sha256'][:16]})")
+            L.append(f"{'Source':<18}{a['file']}{rng}")
             if a.get("camera"):
                 L.append(f"{'Camera':<18}{camera_line(a['camera'])}")
         if not sources:
@@ -466,9 +567,10 @@ class PertineoAuditExternalStep:
         L += ["", note]
         rows = [(lbl.strip(), val, (0.92, 0.60, 0.10) if val == CH.UNK else None) for lbl, val in
                 ((x[:18], x[18:]) for x in L[2:-2])]
-        pdf = {"kicker": "AUDIT · EXTERNAL STEP", "title": os.path.basename(path),
+        pdf = {"kicker": "AUDIT · EXTERNAL STEP", "title": seq["name"] if seq else os.path.basename(path),
                "subtitle": " · ".join(x for x in (manual.get("step"), author, rep["generated"][:10]) if x),
-               "picture": _picture(path), "rows": rows, "note": note,
+               "picture": _picture(os.path.join(seq["folder"], seq["frames"][len(seq["frames"]) // 2]) if seq else path),
+               "rows": rows, "note": note,
                "footer": f"External step · {os.path.basename(path)} · Pertineo VFX {own_version()} · declared by the "
                          "user, not recorded by ComfyUI",
                "author": author or None}

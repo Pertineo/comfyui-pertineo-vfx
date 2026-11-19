@@ -217,7 +217,8 @@ def _slim(rep, path):
         "manual": manual,
         "context": rep.get("context") or {},
         "file": {k: f.get(k) for k in ("name", "basename", "format", "width", "height", "folder", "saved",
-                                       "version", "first_frame", "fps", "camera")},
+                                       "version", "first_frame", "fps", "camera", "last_frame", "frame_count",
+                                       "missing_frames")},
         "outputs": sorted(output_hashes(rep)),
         # files to show in the PDF: video / audio / sequence frames (relative to the report folder)
         "media": [{"kind": o.get("kind"), "path": o.get("path"), "frames": o.get("frames"), "fps": o.get("fps"),
@@ -225,9 +226,10 @@ def _slim(rep, path):
                    "duration_sec": o.get("duration_sec")}
                   for o in f.get("outputs") or [] if isinstance(o, dict) and o.get("path")],
         "frames": sorted(k for k in (f.get("checksum_list") or {})
-                         if re.search(r"\.\d+\.(png|exr|tiff?|jpe?g)$", k, re.I)),
+                         if re.search(r"\d+\.(png|exr|tiff?|jpe?g|dpx|webp)$", k, re.I)),
         "inputs": [{k: a.get(k) for k in ("file", "role", "sha256", "node_type", "node_id", "width", "height", "added",
-                                                   "camera")}
+                                                   "camera", "frame_sha256", "path", "files_in_folder",
+                                                   "first_frame", "last_frame")}
                    for a in rep.get("input_assets") or [] if isinstance(a, dict)]
                   + [{k: a.get(k) for k in ("file", "role", "sha256", "width", "height", "added", "camera")}
                      for a in am_inputs
@@ -359,9 +361,60 @@ def _name_hint(stem, reports, exclude):
     return best if score >= 0.8 else None
 
 
-def build_chain(start, reports, by_hash, max_depth=50):
+def _short_path(p):
+    return "/".join(str(p).split(os.sep)[-2:])
+
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def frame_range_text(r):
+    """'frames 1001–1240 (240)' for a step that wrote an image sequence – '' otherwise."""
+    f = r.get("file") or {}
+    first, last, n = f.get("first_frame"), f.get("last_frame"), f.get("frame_count")
+    if not (first is not None and last is not None):
+        nums = []
+        for k in r.get("frames") or []:
+            m = re.search(r"(\d+)\.[A-Za-z0-9]+$", k)
+            if m:
+                nums.append(int(m.group(1)))
+        if not nums:
+            return ""
+        first, last, n = min(nums), max(nums), len(nums)
+    miss = f.get("missing_frames")
+    return f"frames {first}–{last} ({n or last - first + 1})" + (f", {miss} missing" if miss else "")
+
+
+def asset_name(a):
+    """File name of an input; a folder / sequence as 'name/' or its pattern, with frame range / count when known."""
+    f = str(a.get("file") or "?")
+    if is_folder_input(a) or a.get("role") == "image sequence":
+        n = a.get("files_in_folder")
+        nm = os.path.basename(f.rstrip("/"))
+        nm = nm if "#" in nm else nm + "/"
+        if a.get("first_frame") is not None and a.get("last_frame") is not None:
+            return f"{nm} frames {a['first_frame']}–{a['last_frame']} ({n})"
+        return nm + (f" ({n} frames)" if n else "")
+    return os.path.basename(f)
+
+
+def is_folder_input(a):
+    """An input that is a folder / image sequence (a sequence loader) rather than a single file."""
+    f = str(a.get("file") or "")
+    return (f.endswith("/") or "folder" in str(a.get("sha256") or "") or a.get("files_in_folder") is not None
+            or a.get("role") == "image sequence")
+
+
+def _sequence_names(rep):
+    """Sub folders this report wrote sequences into (Save Media: <name>/<name>.####.exr)."""
+    return {k.split("/")[0] for k in rep.get("frames") or [] if "/" in k}
+
+
+def build_chain(start, reports, by_hash, max_depth=50, folder_hashes=None):
     """Walks back from the final report through the inputs. Returns the steps in order (sources first, the final
-    step last), each {id, report, inputs:[{asset, from (step id) | None, hint}], depth}."""
+    step last), each {id, report, inputs:[{asset, from (step id) | None, hint}], depth}.
+    folder_hashes(asset, report) -> [sha256 of frames]: for sequence / folder inputs, which are linked through the
+    hashes of their frames (the report that wrote the sequence lists every frame)."""
     steps, by_path = [], {}
 
     def visit(rep, depth):
@@ -371,8 +424,30 @@ def build_chain(start, reports, by_hash, max_depth=50):
         by_path[rep["path"]] = node  # set before the inputs: protects against loops
         for a in rep["inputs"]:
             h = (a.get("sha256") or "").lower()
-            prod = [r for r in by_hash.get(h, []) if r["path"] != rep["path"]] if h else []
+            hs = [h] if _HEX64.match(h) else []
+            seq = is_folder_input(a)
+            if seq:  # an image sequence: linked through the hashes of its frames
+                hs += [str(x).lower() for x in (a.get("frame_sha256") or {}).values() if _HEX64.match(str(x).lower())]
+                if not hs and folder_hashes:
+                    try:
+                        hs += [x.lower() for x in folder_hashes(a, rep) or [] if x]
+                    except Exception:
+                        pass
+                h = hs[0] if hs else h
+            prod = []
+            for x in hs:
+                prod = [r for r in by_hash.get(x, []) if r["path"] != rep["path"]]
+                if prod:
+                    break
             item = {"asset": a, "from": None, "hint": None}
+            if seq and not prod:
+                name = os.path.basename(str(a.get("file") or "").rstrip("/"))
+                cand = [r for r in reports if name and name in _sequence_names(r) and r["path"] != rep["path"]]
+                if cand:
+                    item["hint"] = (f"sequence folder '{name}' has the name of a sequence written by "
+                                    f"{_short_path(cand[0]['path'])} – frames not found to verify")
+                    node["inputs"].append(item)
+                    continue
             if prod and depth < max_depth:
                 item["from"] = visit(prod[0], depth + 1)
             elif not h:
@@ -616,7 +691,9 @@ def render_text(steps, summary, folders, n_reports, version=""):
         if r["workflow_type"]:
             L.append(_line("    Workflow", ", ".join(map(str, r["workflow_type"]))))
         size = f"{f.get('width')}x{f.get('height')} · " if f.get("width") and f.get("height") else ""
-        L.append(_line("    Output", f"{size}{f.get('format') or ''} · saved {str(f.get('saved') or r['generated'])[:16]}"))
+        L.append(_line("    Output", f"{size}{f.get('format') or ''}" + (f" · {frame_range_text(r)}" if frame_range_text(r)
+                                                                         else "")
+                       + f" · saved {str(f.get('saved') or r['generated'])[:16]}"))
         L.append(_line("    Report", ("none – file " + _rel(os.path.join(f.get("folder") or "", f.get("name") or ""))
                                           + " · named as source in a declared step") if r.get("kind") == PHOTO else
                        _rel(r["path"]) + (f" (Pertineo VFX {r['generator']})" if r["generator"] else "")
@@ -628,7 +705,7 @@ def render_text(steps, summary, folders, n_reports, version=""):
                    f"{item['declared']} (documented by this declaration)" if item.get("declared") else
                    (f"GAP – {item['hint']}" if item["hint"] else "outside source (not audited)"))
             add = f"  (added later, {str(a['added'])[:10]})" if a.get("added") else ""
-            L.append(_line("    Input", f"{a.get('role') or 'input'} · {os.path.basename(str(a.get('file') or '?'))}  "
+            L.append(_line("    Input", f"{a.get('role') or 'input'} · {asset_name(a)}  "
                                         f"{src}{add}"))
         for label, value in step_details(r, full=True):
             L.append(_line("    " + label, value))
@@ -775,6 +852,20 @@ def find_start(final, reports, by_hash, sha256_of):
         if rep is None:
             raise ValueError(f"{final} is not a Pertineo audit report.")
         return _slim(rep, real), "report given (outside the searched folders)"
+    if os.path.isdir(real) or "#" in os.path.basename(real) or re.search(r"%0?\d*d", os.path.basename(real)):
+        # an image sequence: its report lies next to the folder (<folder>.audit.json) – else find it by a frame
+        folder = real if os.path.isdir(real) else os.path.dirname(real)
+        for cand in (folder + ".audit.json", folder + ".json"):
+            if os.path.isfile(cand) and load_report(cand) is not None:
+                return next((r for r in reports if r["path"] == os.path.realpath(cand)),
+                            _slim(load_report(cand), cand)), "report next to the sequence"
+        frames = sorted(f for f in os.listdir(folder) if re.search(r"\d+\.(png|exr|tiff?|jpe?g|dpx|webp)$", f, re.I))
+        for f in frames[len(frames) // 2:len(frames) // 2 + 1] + frames[:1]:
+            h = sha256_of(os.path.join(folder, f)).lower()
+            if h in by_hash:
+                return by_hash[h][0], "found by the SHA256 of a frame"
+        raise ValueError(f"No audit report wrote the sequence {os.path.basename(folder)} – searched {len(reports)} "
+                         "reports. Add the folder of its report to search_folders.")
     stem = re.sub(r"\.[A-Za-z0-9]+$", "", real)
     for cand in (stem + ".audit.json", stem + ".json"):
         if os.path.isfile(cand):

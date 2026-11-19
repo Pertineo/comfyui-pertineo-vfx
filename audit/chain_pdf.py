@@ -360,7 +360,7 @@ def _draw_graph(doc, w, steps, thumbs, assess=True):
             doc.rect(x, y, bw, bh, fill=fill, stroke=amber, lw=0.8)
             head = {"gap": "GAP – not verified", "outside": "outside source"}.get(n["kind"], n["hint"])
             doc.text(x + 5, y + 11, head, 6.5, True, amber)
-            fn = os.path.basename(str(n["asset"].get("file") or "?"))
+            fn = CH.asset_name(n["asset"])
             pic = thumbs.get(k)
             if pic is not None:  # the file itself was found: show it, framed in the colour of its status
                 _thumb(doc, pic, x, y, bw, bh)
@@ -588,7 +588,7 @@ def _topic_sections(doc, w, steps, summary, full_prompts, assess, licenses):
     for s in steps:
         for it in s["inputs"]:
             a = it["asset"]
-            fn = os.path.basename(str(a.get("file") or "?"))
+            fn = CH.asset_name(a)
             if it["from"] is not None:
                 k = it["from"]["report"].get("kind")
                 org = (f"{it['from']['id']} – " + ("camera original" if k == CH.PHOTO else
@@ -690,7 +690,9 @@ def _topic_sections(doc, w, steps, summary, full_prompts, assess, licenses):
         if aud and not f.get("width"):
             size = CH.audio_text(aud)
         sha = (r.get("outputs") or [""])[0] if r.get("outputs") else ""
-        rows.append(([s["id"], f.get("name") or "", f"{size}\n{f.get('format') or ''}".strip(),
+        rng = CH.frame_range_text(r)
+        rows.append(([s["id"], f.get("name") or "", f"{size}\n{f.get('format') or ''}".strip() +
+                      (f"\n{rng}" if rng else ""),
                       str(f.get("saved") or r.get("generated") or "")[:16].replace("T", " "),
                       _sha(sha, False), CH.repro_text(r) +
                       (f"\n{len(s.get('alternatives') or [])} variant(s) not used" if s.get("alternatives") else "")],
@@ -791,11 +793,13 @@ def write_chain_pdf(path, steps, summary, thumbs, version="", title=None, full_p
             if r["workflow_type"]:
                 rows.append(("Workflow", ", ".join(map(str, r["workflow_type"])), None))
             size = f"{f.get('width')}x{f.get('height')} · " if f.get("width") and f.get("height") else ""
+            rng = CH.frame_range_text(r)
             rows.append(("Output", f"{f.get('name') or ''} · {size}{f.get('format') or ''} · "
-                                   f"{str(f.get('saved') or r['generated'])[:16].replace('T', ' ')}", None))
+                                   + (f"{rng} · " if rng else "")
+                                   + f"{str(f.get('saved') or r['generated'])[:16].replace('T', ' ')}", None))
             for it in s["inputs"]:
                 a = it["asset"]
-                fn = os.path.basename(str(a.get("file") or "?")) + (
+                fn = CH.asset_name(a) + (
                     f" (added later, {str(a['added'])[:10]})" if a.get("added") else "")
                 if it["from"] is not None:
                     rows.append(("Input", f"{fn}  <- {it['from']['id']}", None))

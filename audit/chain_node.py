@@ -131,7 +131,7 @@ class PertineoAuditChain:
         p = clean_path(final)
         if not p:
             return "Audit Chain: enter the final file or its .audit.json."
-        if not os.path.isfile(p):
+        if not os.path.isfile(p) and not os.path.isdir(p) and not os.path.isdir(os.path.dirname(p)):
             return f"Audit Chain: file not found: {p}"
         return True
 
@@ -155,14 +155,19 @@ class PertineoAuditChain:
         print(f"{LOG} Audit Chain: {len(reports)} audit reports in {', '.join(folders)}")
         start, how = CH.find_start(final, reports, by_hash,
                                    lambda p: hashing.sha256_file(p, label=os.path.basename(p))[0])
-        steps = CH.build_chain(start, reports, by_hash)
+        steps = CH.build_chain(start, reports, by_hash, folder_hashes=_folder_hasher(folders))
         summary = CH.summarize(steps, reports, final)
         version = own_version()
         text = CH.render_text(steps, summary, folders, len(reports), version)
         pbar.update_absolute(90, 100)
 
         base = CH._stem(start["file"].get("name") or start["path"]) or "chain"
-        out_dir = os.path.join(os.path.dirname(final), base + "_chain")
+        home = os.path.dirname(final)
+        if os.path.isdir(final) or os.path.basename(home) == (start["file"].get("name") or ""):
+            # an image sequence (its folder, or a frame inside it): the chain folder goes next to the sequence
+            # folder, never into it
+            home = os.path.dirname(final.rstrip(os.sep)) if os.path.isdir(final) else os.path.dirname(home)
+        out_dir = os.path.join(home, base + "_chain")
         os.makedirs(out_dir, exist_ok=True)
         used = [int(m.group(1)) for m in (re.match(re.escape(base) + r"\.chain_v(\d+)\.", n) for n in os.listdir(out_dir))
                 if m]
@@ -287,6 +292,57 @@ def _waveform(path):
     wav = np.frombuffer(r.stdout, dtype=np.float32)[None]
     img = waveform_image((wav, 8000), width=900, height=420, ruler=True)
     return Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8))
+
+
+_SEQ_EXTS = (".exr", ".png", ".tif", ".tiff", ".dpx", ".jpg", ".jpeg", ".webp")
+
+
+def _folder_hasher(folders):
+    """For sequence / folder inputs of older reports (recorded without frame hashes): finds the folder and hashes
+    its first and middle frame (cached), so the chain can link the sequence to the step that wrote it."""
+    try:
+        inp = folder_paths.get_input_directory()
+    except Exception:
+        inp = ""
+    dirs_by_name = {}
+
+    def find_dir(a, rep):
+        p = str(a.get("path") or "")
+        if p and os.path.isdir(p):
+            return p
+        f = str(a.get("file") or "").rstrip("/")
+        if f.startswith("<input>/") and inp:
+            q = os.path.join(inp, f[len("<input>/"):])
+            if os.path.isdir(q):
+                return q
+        if os.path.isabs(f) and os.path.isdir(f):
+            return f
+        name = os.path.basename(f)
+        if not name:
+            return None
+        q = os.path.join(os.path.dirname(rep["path"]), name)
+        if os.path.isdir(q):
+            return q
+        if not dirs_by_name:  # one walk over the search folders, directories only
+            for root in folders:
+                for dirpath, dirnames, _files in os.walk(root):
+                    dirnames[:] = [d for d in dirnames if not d.startswith(".") and not d.endswith("_chain")]
+                    for d in dirnames:
+                        dirs_by_name.setdefault(d, os.path.join(dirpath, d))
+            dirs_by_name.setdefault("", "")
+        return dirs_by_name.get(name)
+
+    def hasher(a, rep):
+        d = find_dir(a, rep)
+        if not d:
+            return []
+        frames = sorted(f for f in os.listdir(d) if f.lower().endswith(_SEQ_EXTS))
+        if not frames:
+            return []
+        pick = list(dict.fromkeys([frames[0], frames[len(frames) // 2]]))
+        return [hashing.sha256_file(os.path.join(d, f), label=f)[0] for f in pick]
+
+    return hasher
 
 
 def input_pictures(steps, folders, final):

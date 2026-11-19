@@ -295,12 +295,25 @@ def input_assets(graph, executed, show, warn, compute_hashes=True):
             elif kind == "file":
                 entry["sha256"] = "not computed (compute_model_hashes is off)"
             elif kind == "folder":
+                frames = []
                 try:
-                    n = sum(1 for f in os.listdir(full) if f.lower().endswith(MEDIA_EXTS))
-                    entry["files_in_folder"] = n
+                    frames = sorted(f for f in os.listdir(full) if f.lower().endswith(MEDIA_EXTS))
+                    entry["files_in_folder"] = len(frames)
                 except OSError:
                     pass
                 entry["sha256"] = "not computed (folder)"
+                # 1.8.1: the first, middle and last frame are hashed – the Audit Chain links the sequence through
+                # them to the step that wrote it (that report lists the hash of every frame)
+                if frames and compute_hashes:
+                    pick = list(dict.fromkeys([frames[0], frames[len(frames) // 2], frames[-1]]))
+                    fh = {}
+                    for f in pick:
+                        try:
+                            fh[f] = hashing.sha256_file(os.path.join(full, f), label=f)[0]
+                        except Exception:
+                            pass
+                    if fh:
+                        entry["frame_sha256"] = fh
             else:
                 entry["sha256"] = "not computed – file not found"
                 if nid in exe:

@@ -3,6 +3,25 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.8.1 – 2026-11-19
+
+### Fixed
+- **Audit Chain – image sequences as an intermediate step:** a step that loads a sequence (folder) was not linked to
+  the step that wrote it, because folder inputs had no SHA256. The chain now links a sequence through the hashes of
+  its frames (the report that wrote it lists every frame): for older reports it finds the folder and hashes its
+  first and middle frame (cached); if the folder is gone but its name matches a written sequence, it is shown as a
+  gap with that hint. Sequence inputs are shown as `name/ (n frames)`.
+- **Audit External Step – image sequences:** `file` and `source_files` take a sequence – its folder or a pattern
+  (`name.####.exr`, `name.%04d.exr`). A sequence made outside ComfyUI (Nuke / Natron render) gets its report next to
+  the folder with the SHA256 of every frame; a source sequence is linked through its first, middle and last frame.
+- **Audit Chain:** `final` can be a sequence (its folder, a pattern or any frame); sequences show their frame range
+  (`frames 1001–1240 (240)`, missing frames counted) in the audit, breakdown and .txt; the chain folder goes next to
+  the sequence folder, never into it.
+- **Audit External Step:** a path in `source_files` that got a line break pasted into it is joined again instead of
+  failing with "source file not found".
+- **Collect Metadata:** folder / sequence inputs now record the SHA256 of their first, middle and last frame
+  (`frame_sha256`), so new reports link without looking for the folder.
+
 ## 1.8.0 – 2026-11-19
 
 ### Added
