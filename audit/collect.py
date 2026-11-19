@@ -1761,6 +1761,12 @@ def latent_info(graph, nid, source_link=None):
             size = image_info(graph.runtime_object(nid, 0))
             if size:
                 info["result_width"], info["result_height"] = size["width"], size["height"]
+            # 1.8.0: the tile size is the resolution the model actually sampled at
+            for k in ("tile_width", "tile_height"):
+                if k in ins:
+                    r = graph.resolve(ins[k])
+                    if r[0]:
+                        info[k] = r[1]
             return info
     for _ in range(8):
         if not is_link(v):
@@ -1852,6 +1858,12 @@ def sampling(graph, executed, self_id=None):
         prompts["negative"] = trace_prompts(graph, neg_root, "negative", {}) if neg_root is not None else []
         if "guidance" in extra and "guidance" not in params:
             params["guidance"] = extra["guidance"]
+        # 1.8.0: a BasicGuider has no CFG at all – say so instead of leaving the field empty
+        g = ins.get("guider")
+        if is_link(g) and "cfg" not in params and "guidance" not in params:
+            gtype = graph.ctype(g[0])
+            if "basicguider" in gtype.lower().replace("_", ""):
+                params["cfg"] = f"none ({gtype} – no CFG)"
         out.append({"node_id": nid, "node_type": graph.ctype(nid), "title": graph.title(nid),
                     "params": params, "unresolved": unresolved, "resolved_from": sources,
                     "latent": latent_info(graph, nid, source_link), "prompts": prompts})

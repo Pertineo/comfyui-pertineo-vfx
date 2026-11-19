@@ -1,0 +1,8 @@
+# Pertineo VFX for ComfyUI
+# Copyright (C) 2026 Julia Kietzmann (Pertineo, https://pertineo.de)
+# SPDX-License-Identifier: GPL-3.0-or-later
+# This program comes with ABSOLUTELY NO WARRANTY. It is free software, and you are welcome to
+# redistribute it under the terms of the GNU GPL v3 or later; see the LICENSE and NOTICE files.
+
+"""Seam Repair: find and repair the seams of chained renders – motion jumps, zoom steps, duplicate frames,
+sharpness steps, overlapping sections."""

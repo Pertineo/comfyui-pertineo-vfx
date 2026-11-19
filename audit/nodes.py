@@ -377,15 +377,19 @@ class PertineoSaveImageMetadata:
             "required": {
                 "images": ("IMAGE", {"tooltip": "Image batch to save."}),
                 "output_folder": ("STRING", {"default": "", "multiline": True,
-                    "placeholder": "OUTPUT: empty = ComfyUI output folder; relative = inside it; absolute allowed",
+                    "placeholder": "OUTPUT: empty = ComfyUI output folder; relative = inside it; absolute allowed "
+                                   "– ignored when output_name is connected",
                     "tooltip": "Target folder. Empty = ComfyUI output folder, a relative path is created inside it, "
-                               "absolute paths are allowed. Created if it does not exist."}),
+                               "absolute paths are allowed. Created if it does not exist. Ignored when output_name "
+                               "is connected – the folder then comes from Pertineo Output Name."}),
                 "filename_prefix": ("STRING", {"default": "audit",
+                    "placeholder": "prefix – ignored when output_name is connected",
                     "tooltip": "File name before the counter: <prefix>_001.png. Can be linked (e.g. from a "
                                "file name). A trailing image extension is removed; 'sub/name' writes into a "
-                               "sub folder."}),
+                               "sub folder. Ignored when output_name is connected – name and version then come "
+                               "from Pertineo Output Name."}),
                 "counter_digits": ("INT", {"advanced": True, "default": 3, "min": 1, "max": 8,
-                    "tooltip": "Digits of the counter (3 = _001)."}),
+                    "tooltip": "Digits of the counter (3 = _001). Ignored when output_name is connected."}),
                 "format": (FORMATS, {
                     "tooltip": "PNG 8 bit (like Save Image), PNG 16 bit, or EXR 32-bit float. EXR values are "
                                "converted from sRGB to linear; the workflow is not embedded in EXR files."}),
@@ -776,12 +780,16 @@ for _suffix, _label, _folder in MODEL_INFO_TYPES:
 
 
 from .loaders import LOADER_CLASSES  # noqa: E402 – needs info_outputs defined above
+from .chain_node import PertineoAuditChain  # noqa: E402
+from .external_node import PertineoAuditExternalStep  # noqa: E402
 
 NODE_CLASS_MAPPINGS = {
     "PertineoCollectMetadata": PertineoCollectMetadata,
     "PertineoProductionContext": PertineoProductionContext,
     "PertineoSaveImageMetadata": PertineoSaveImageMetadata,
     "PertineoLoraLoaderInfo": PertineoLoraLoaderInfo,
+    "PertineoAuditChain": PertineoAuditChain,
+    "PertineoAuditExternalStep": PertineoAuditExternalStep,
     **{k: v[0] for k, v in MODEL_INFO_CLASSES.items()},
     **{k: v[0] for k, v in LOADER_CLASSES.items()},
 }
@@ -790,6 +798,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PertineoProductionContext": "Pertineo Production Context",
     "PertineoSaveImageMetadata": "Pertineo Save Image + Metadata",
     "PertineoLoraLoaderInfo": "Pertineo LoRA Loader + Info",
+    "PertineoAuditChain": "Pertineo Audit Chain",
+    "PertineoAuditExternalStep": "Pertineo Audit External Step",
     **{k: v[1] for k, v in MODEL_INFO_CLASSES.items()},
     **{k: v[1] for k, v in LOADER_CLASSES.items()},
 }

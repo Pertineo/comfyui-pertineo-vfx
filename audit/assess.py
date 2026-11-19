@@ -11,6 +11,7 @@ Rules: everything is derived from the graph or from the user's declarations – 
 Each finding carries its evidence class (observed / derived / declared / external) and the department
 it should go to."""
 
+import json
 import os
 import re
 
@@ -25,6 +26,7 @@ _INPUT_NAME_RE = re.compile(r"^(image|images|video|audio|mask|file|filename|file
                             r"image_path|video_path|audio_path|audio_file|image_file|video_file|input_path|"
                             r"source_folder|plate_folder|trimap_folder|sequence|text_file|caption_file|url)\d*$", re.I)
 _SKIP_INPUT_RE = re.compile(r"output|save|prefix|model_info", re.I)
+_STATE_FILE_KEYS = ("file", "filename", "path", "audio", "image", "video")
 _SECRET_NAME_RE = re.compile(r"(^|[_-])(api[_-]?key|apikey|token|access[_-]?key|secret|secret[_-]?key|password|"
                              r"passwd|bearer|credentials?|auth[_-]?token|authorization)($|[_-])", re.I)
 _SECRET_VALUE_RE = re.compile(r"^(sk-[A-Za-z0-9_-]{16,}|hf_[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|"
@@ -241,6 +243,18 @@ def input_assets(graph, executed, show, warn, compute_hashes=True):
             ok, val, _n, _c = graph.resolve(raw)
             if not ok or not isinstance(val, str) or not val.strip() or _SKIP_INPUT_RE.search(name):
                 continue
+            # 1.8.0: some loaders keep the file in a JSON state widget (Pixaroma Load Audio: LoadAudioState =
+            # '{"file": "music_v001.wav", "start": …}') – take the file name out of it
+            if val.lstrip().startswith("{"):
+                try:
+                    state = json.loads(val)
+                except Exception:
+                    state = None
+                inner = next((state[k] for k in _STATE_FILE_KEYS if isinstance(state, dict)
+                              and isinstance(state.get(k), str) and state[k].strip().lower().endswith(MEDIA_EXTS)), None)
+                if not inner:
+                    continue
+                val = inner
             low = val.strip().lower()
             if not (_INPUT_NAME_RE.match(name) or low.endswith(MEDIA_EXTS) or _URL_RE.match(low)):
                 continue

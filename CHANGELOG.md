@@ -3,6 +3,67 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.8.0 – 2026-11-19
+
+### Added
+New group **Seam Repair** (*Pertineo/Seam Repair*): find and repair the joins of chained generations (extend runs,
+upscale chunks) directly on the image sequence. Every repair writes a new, complete sequence in the source format;
+the source is never changed.
+- **Pertineo Seam Detect:** finds one-frame jumps, speed / direction changes, sharpness steps and duplicate frames
+  (optical flow at low resolution, reads the files itself). Sharpness steps are compared with the local level of the
+  shot, with a minimum step (`min_quality`, default 8 %). Graph coloured by kind, report incl. the strongest
+  frames below `sensitivity`, `seams` list for the repair nodes.
+- **Pertineo Seam Stabilize:** smooths the camera path around each seam (`seams` ± `window`, or ranges `a-b`) –
+  `position`, `rotation`, `scale`, `perspective` separately (`strength`, `smoothing`) – and applies only the
+  difference as one bicubic warp at full resolution, like Tracker › smooth › Stabilize in Nuke. Anchor frames and
+  everything outside the windows stay bit for bit; HDR values are kept. `border`: extend edges / black / auto scale
+  to fill. `morph` (experimental): local smoothing. `detail_seams`: sharpness after a seam matched band by band to the
+  frames before it (`detail_strength`, `detail_frames`, `detail_max_gain`); `detail_mode` *deflicker (whole
+  sequence)* brings the sharpness of every frame to its smoothed course over time (`deflicker_window`) – for sharpness
+  that pulses through a chunked / interpolated shot. Unchanged frames as hard links or copies,
+  `.sha256`, `.workflow.json`, `<name>.seam_report.txt` (every jump before → after), chart on the node. Optional
+  `output_name`.
+- **Pertineo Seam Interpolate:** replaces `radius` frames on each side of a seam by in-betweens from FILM / RIFE
+  (ComfyUI's Load Frame Interpolation Model) – for short jerks and duplicate frames.
+- **Pertineo Seam Window** + **Pertineo Seam Write:** regenerate across a seam with a video model – window with
+  bridge + context frames (8n+1), temporal inpaint mask, `seam_index` counting up per run; the result is written
+  back into a complete copy of the sequence with a crossfade (`feather`).
+- **Pertineo Overlap Blend:** joins sections saved as separate sequences with overlapping frame numbers –
+  `flow (morph)` (no double image), `cross-dissolve` or `hard cut`; `blend_frames` centred in the overlap, `curve`.
+
+- **Pertineo Audit Chain** (*Pertineo/Audit*): one breakdown for a whole job. Starts from the final file (or its
+  `.audit.json`) and walks back through all audit reports in `search_folders` by SHA256 – the output of one step is
+  the input of the next. Writes `<name>_chain/` with `<name>.chain_v001.txt / .json / .pdf` (`if_exists`: new
+  version / overwrite). The PDF shows the final result, the strictest triage as a badge and the chain as a node
+  graph of small pictures (sources at the top, parallel branches side by side, merging into the final step), then every step with its picture (image, middle frame of a video / sequence, waveform of a sound). Every step with
+  `step` / `step_description`, models and licenses, inputs and their origin, triage and reproducibility; the
+  strictest triage of the chain; models across the chain; outside sources (inputs not made in an audited step);
+  gaps (a file changed outside ComfyUI – shown with a name hint, never as a verified link); iterations that were not
+  used; open points. Per step the full disclosure (environment, node packages, APIs, models with role, file, SHA256,
+  source, license and commercial use, reference sources, prompts / negative prompts, seed, sampler / scheduler, steps,
+  CFG, denoise, resolutions, duration / fps, external software, changes outside ComfyUI) – anything not established
+  reads UNKNOWN / NOT VERIFIED; steps without generation say *not applicable*. `pdf_content`: audit (complete record), breakdown (overview) or both as separate files; `pdf_prompts`: shortened or full; `pdf_assessment`: with or without triage (context, approvals, findings, principles); `write_overview`: an extra neutral overview without grades and licenses; `title`: own heading for the PDFs; `audit_layout`: by topic (the whole chain per subject: context, approvals, findings, principles matrix, one models & licenses table, inputs & provenance, environment, generation settings, prompts, outputs) or by step. Per step a line "Not used" (LoRA, ControlNet, IP-Adapter, upscaler, VLM) states what a step did not use. An input whose size an older report did not record gets the size of the linked step's output (same SHA256 = same file). The PDF and the .txt end with the triage grades A–X (the chain's grade marked). External Step reads the pixel size and the camera data of photos – camera, lens, capture time, exposure, f-number, ISO – from camera raws (RW2, CR2, NEF, ARW, DNG, ORF …) and from the EXIF of JPEG / TIFF; the chain shows the camera original (a raw or a photo with camera data named as source of a declared step) as a step of its own – "photo", with camera symbol and camera line. Sound outputs show format, sample rate, channels and length instead of a resolution. The legend explains the grey "-" (no grade). Steps are numbered from the start of the chain (longest branch first, each branch in one run, final step last); a camera original shows the JPEG preview embedded in the raw. Inputs without a report (outside sources, gaps) show their picture in the graph when the file is found (where it was loaded from, the ComfyUI input folder, the search folders). The disclosure checklist over the
+  whole chain is a file of its own (`<name>.chain_v001.checklist.txt` / `.pdf`, incomplete items first). Reads every report
+  from 1.4.0 on, also Save Media outputs (video, sequences, audio); by default also searches the ComfyUI input folder.
+- **Audit Chain – older reports:** values an older report did not extract but that are plainly in the workflow it
+  carries (`comfyui_workflow`, from 1.4.1 on) are read from there and marked "from the recorded workflow": the tile
+  size of Ultimate SD Upscale, the CFG of a sampler, "no CFG" for a BasicGuider, the generation size where the latent comes from a node with a constant size or a loaded image of known size. Reports from 1.4.0 (no workflow in the report): read from the workflow ComfyUI embedded in the saved PNG. When the sampler's output is decoded and saved without resizing, the generation size is the size of the saved image (marked as such).
+- **Pertineo Audit External Step** (*Pertineo/Audit*): declares work outside ComfyUI. *external step* writes
+  `<name>.audit.json` next to a photo or an edited file (SHA256 of the file and its source files, software, changes,
+  origin and rights; optional `.txt` / `.pdf` with a picture of the file) – the chain links it as a declared step instead of a gap / outside source. *amend report* adds
+  missing declarations and unrecorded input files (e.g. the music of an older video report) to an existing report as `<report>.amend.json` (the report is not changed; shown as
+  "added later"). Files a declared step was made from that no audited step wrote (a raw photo, a .kra / .psd / .nk
+  project file) count as documented by the declaration – grey boxes in the graph, not outside sources or gaps.
+
+### Changed
+- **Collect Metadata – sampling:** with SamplerCustomAdvanced and a BasicGuider the report says "cfg none (BasicGuider –
+  no CFG)" instead of leaving CFG out.
+- **Collect Metadata – resolution:** tiled upscalers (Ultimate SD Upscale) also record the tile size.
+- **Collect Metadata – input files:** loaders that keep the file in a JSON state widget (e.g. Pixaroma Load Audio)
+  are now listed under input files and hashed, so a music file links its video step to the music step.
+- **Save Image + Metadata:** `output_folder`, `filename_prefix` and `counter_digits` say in their placeholder /
+  tooltip that they are ignored when `output_name` is connected.
+
 ## 1.7.0 – 2026-11-08
 
 ### Added

@@ -23,6 +23,7 @@ NODE_GROUPS = [
     "image_io",
     "matting",
     "audit",
+    "seam_repair",
 ]
 
 NODE_CLASS_MAPPINGS = {}
