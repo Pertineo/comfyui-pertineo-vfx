@@ -3,6 +3,23 @@
 All notable changes to **Pertineo VFX for ComfyUI** (`comfyui-pertineo-vfx`).
 Versions follow `major.minor.patch`: patch = bug fix, minor = new nodes / options (backwards compatible).
 
+## 1.8.2 – 2026-11-19
+
+### Added
+- **Audit External Step – external AI:** new optional inputs `external_ai` (not declared / no / yes) and
+  `external_ai_tools` (which AI, from whom, what for – e.g. "Claude Opus 5.5 (Anthropic) – prompt drafted, edited by
+  …"). Works in both modes; with *amend report* it can be added to existing reports. The Audit Chain shows the
+  declaration next to the prompts (audit, breakdown, overview, .txt) and lists it in the checklist for every step
+  with prompts.
+- **Audit External Step – `fps`:** optional frame rate for a video / image sequence that does not carry one (an EXR
+  sequence has none).
+
+### Fixed
+- **Audit Chain – video duration and frame rate:** read from the video file itself (PyAV, or ffprobe if present)
+  when the report does not have them – external steps (Resolve / Natron renders) and older reports; for an image
+  sequence from its frame count and the declared `fps`. Shown in the audit, breakdown, overview, outputs table and
+  checklist, with where the value comes from.
+
 ## 1.8.1 – 2026-11-19
 
 ### Fixed

@@ -24,13 +24,16 @@ from .collect import own_version
 CATEGORY = "Pertineo/Audit"
 MODES = ["external step", "amend report"]
 _LABELS = {"step": "Step", "workflow_purpose": "Purpose", "external_software": "Software",
-           "changes_outside_comfyui": "Changes", "reference_image_sources": "Origin / rights", "notes": "Notes"}
+           "changes_outside_comfyui": "Changes", "reference_image_sources": "Origin / rights", "notes": "Notes",
+           "external_ai": "External AI", "external_ai_tools": "External AI tools", "fps": "Frame rate"}
 _IMG = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".exr")
 _VID = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".mxf")
 _AUD = (".wav", ".flac", ".mp3", ".aac", ".ogg", ".m4a")
 # node input -> manual field of the report
 FIELDS = (("step", "step"), ("purpose", "workflow_purpose"), ("software", "external_software"),
-          ("changes", "changes_outside_comfyui"), ("origin_and_rights", "reference_image_sources"))
+          ("changes", "changes_outside_comfyui"), ("origin_and_rights", "reference_image_sources"),
+          ("external_ai", "external_ai"), ("external_ai_tools", "external_ai_tools"), ("fps", "fps"))
+AI_CHOICES = ["not declared", "no", "yes"]
 
 
 def _now():
@@ -419,6 +422,22 @@ class PertineoAuditExternalStep:
                 "write_pdf": ("BOOLEAN", {"default": True,
                     "tooltip": "Also write it as PDF (<name>.audit.pdf / <report>.amend.pdf), with a picture of the "
                                "file."}),
+                "external_ai": (AI_CHOICES, {"default": "not declared",
+                    "tooltip": "Was an AI outside this ComfyUI run used for this step – e.g. Claude, ChatGPT or "
+                               "Gemini to write or refine the prompts, or any other external AI service? yes / no is "
+                               "shown next to the prompts in the Audit Chain. not declared = stays UNKNOWN / NOT "
+                               "VERIFIED (amend report: not declared = keep the value)."}),
+                "external_ai_tools": ("STRING", {"default": "", "multiline": True,
+                    "placeholder": "which external AI and what for, e.g. Claude Opus 5.5 (Anthropic) – prompt "
+                                   "drafted, edited by me (amend: empty = keep)",
+                    "tooltip": "Which external AI / LLM, from whom, and what it was used for (e.g. 'Claude Opus 5.5 "
+                               "(Anthropic) – positive prompt drafted, edited by Julia Kietzmann'). Shown next to the "
+                               "prompts in the Audit Chain."}),
+                "fps": ("STRING", {"default": "",
+                    "placeholder": "frame rate, e.g. 24 or 23.976 (amend: empty = keep)",
+                    "tooltip": "Frame rate of a video / image sequence, if the files do not carry it (an EXR "
+                               "sequence has none). The Audit Chain reads it from MP4 / MOV files itself; for a "
+                               "sequence it gives the duration from frames ÷ fps."}),
             },
         }
 
@@ -438,10 +457,19 @@ class PertineoAuditExternalStep:
         return True
 
     def run(self, mode, file, source_files, step, purpose, software, changes, origin_and_rights, author="",
-            notes="", write_txt=True, write_pdf=True):
+            notes="", write_txt=True, write_pdf=True, external_ai="not declared", external_ai_tools="", fps=""):
         path = os.path.realpath(clean_path(file))
+        fps = str(fps or "").strip().replace(",", ".")
+        if fps:
+            try:
+                if float(fps) <= 0:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(f"{LOG} Audit External Step: fps must be a number, e.g. 24 or 23.976 (got {fps!r}).")
         vals = {"step": step, "purpose": purpose, "software": software, "changes": changes,
-                "origin_and_rights": origin_and_rights}
+                "origin_and_rights": origin_and_rights,
+                "external_ai": external_ai if external_ai in ("yes", "no") else "",
+                "external_ai_tools": external_ai_tools, "fps": fps}
         vals = {k: v.strip() for k, v in vals.items() if isinstance(v, str) and v.strip()}
         if mode == MODES[1]:
             written, text, pdf = self._amend(path, vals, (author or "").strip(), (notes or "").strip(),

@@ -13,6 +13,8 @@ import difflib
 import json
 import os
 import re
+import shutil
+import subprocess
 
 SCHEMA_PREFIX = "pertineo-audit"
 GRADE_ORDER = {"A": 0, "B": 1, "C": 2, "D": 3, "X": 4}
@@ -259,7 +261,72 @@ def _slim(rep, path):
         "principles": [{k: x.get(k) for k in ("id", "principle", "status", "basis")}
                        for x in rep.get("principles") or [] if isinstance(x, dict)],
         "reproducibility": (rep.get("reproducibility") or {}).get("status", ""),
+        "probe": _probe_file(rep, path),
     }
+
+
+_VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".mxf", ".m4v")
+_PROBE_CACHE = {}
+
+
+def _probe_video(p):
+    """(frames, fps, seconds) of a video file, read with PyAV (part of ComfyUI) or ffprobe – None if neither can
+    read it. Nothing is decoded except when the container does not store a frame count."""
+    key = (p, os.path.getmtime(p), os.path.getsize(p))
+    if key in _PROBE_CACHE:
+        return _PROBE_CACHE[key]
+    res = None
+    try:
+        import av  # noqa: PLC0415
+        with av.open(p) as c:
+            st = c.streams.video[0]
+            fps = float(st.average_rate or st.base_rate or 0) or None
+            sec = (float(st.duration * st.time_base) if st.duration and st.time_base else
+                   float(c.duration) / 1_000_000 if c.duration else None)
+            n = int(st.frames or 0) or (round(sec * fps) if sec and fps else None)
+            if fps and n:
+                res = (n, fps, sec or n / fps)
+    except Exception:
+        res = None
+    if res is None and shutil.which("ffprobe"):
+        try:
+            out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                  "stream=avg_frame_rate,r_frame_rate,nb_frames,duration:format=duration",
+                                  "-of", "json", p], capture_output=True, text=True, timeout=30)
+            d = json.loads(out.stdout or "{}")
+            st = (d.get("streams") or [{}])[0]
+
+            def rate(x):
+                a, _, b = str(x or "0/0").partition("/")
+                return float(a) / float(b) if b and float(b) else (float(a) if a and not b else None)
+            fps = rate(st.get("avg_frame_rate")) or rate(st.get("r_frame_rate"))
+            sec = float(st.get("duration") or (d.get("format") or {}).get("duration") or 0) or None
+            n = int(st.get("nb_frames") or 0) or (round(sec * fps) if sec and fps else None)
+            if fps and n:
+                res = (n, fps, sec or n / fps)
+        except Exception:
+            res = None
+    _PROBE_CACHE[key] = res
+    return res
+
+
+def _probe_file(rep, report_path):
+    """Frames / fps / duration of the video a step wrote, read from the file on disk (the report may not have
+    them – external steps, older reports). {} if there is no such file."""
+    f = rep.get("file") or {}
+    folders = [x for x in (f.get("folder"), os.path.dirname(report_path)) if x]
+    names = [str(f.get("name") or "")] + [str(o.get("path") or "") for o in f.get("outputs") or []
+                                          if isinstance(o, dict) and "video" in str(o.get("kind"))]
+    for nm in names:
+        if not nm.lower().endswith(_VIDEO_EXTS):
+            continue
+        for fo in folders:
+            p = os.path.join(fo, nm)
+            if os.path.isfile(p):
+                t = _probe_video(p)
+                if t:
+                    return {"frames": t[0], "fps": t[1], "seconds": t[2]}
+    return {}
 
 
 def _prompt_texts(entries, side):
@@ -905,7 +972,24 @@ def _declared(x):
 
 def _is_video(r):
     wt = " ".join(map(str, r.get("workflow_type") or [])).lower()
-    return "video" in wt or any("video" in str(m.get("kind")) for m in r.get("media") or [])
+    return ("video" in wt or any("video" in str(m.get("kind")) for m in r.get("media") or [])
+            or bool(r.get("probe")) or _seq_count(r) > 1)
+
+
+def _seq_count(r):
+    """Number of frames of an image sequence the step wrote (0 = no sequence)."""
+    f = r.get("file") or {}
+    if f.get("frame_count"):
+        return int(f["frame_count"])
+    return len(r.get("frames") or [])
+
+
+def _fps_value(x):
+    try:
+        v = float(str(x).strip().replace(",", "."))
+        return v if v > 0 else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _timing(r):
@@ -913,11 +997,61 @@ def _timing(r):
     for m in r.get("media") or []:
         if "video" in str(m.get("kind")) and m.get("frames") and m.get("fps"):
             return int(m["frames"]), float(m["fps"]), m["frames"] / float(m["fps"])
+    p = r.get("probe") or {}
+    if p.get("frames") and p.get("fps"):
+        return int(p["frames"]), float(p["fps"]), float(p["seconds"])
     f = r.get("file") or {}
+    n = _seq_count(r)
+    fps = _fps_value((r.get("manual") or {}).get("fps")) or _fps_value(f.get("fps"))
+    if n > 1 and fps:
+        return n, fps, n / fps
     a = r.get("audio") or {}
     if f.get("fps") and a.get("duration_sec"):
         return None, float(f["fps"]), float(a["duration_sec"])
     return None
+
+
+def timing_text(r):
+    """'241 frames @ 24 fps = 10.04 s' with where the values come from – UNKNOWN if a video / sequence has none,
+    '' for a still image."""
+    if not _is_video(r):
+        return ""
+    t = _timing(r)
+    if not t:
+        n = _seq_count(r)
+        return (f"{n} frames · frame rate {UNK} (an image sequence carries none – add it with Audit External Step, "
+                f"field fps)") if n > 1 else UNK
+    txt = f"{t[0]} frames @ {t[1]:g} fps = {t[2]:.2f} s" if t[0] else f"{t[2]:.2f} s @ {t[1]:g} fps"
+    if (r.get("probe") or {}).get("fps") and not any("video" in str(m.get("kind")) and m.get("fps")
+                                                      for m in r.get("media") or []):
+        txt += " (read from the file)"
+    elif _fps_value((r.get("manual") or {}).get("fps")) and not _fps_value((r.get("file") or {}).get("fps")):
+        am = (r.get("amended") or {}).get("fps")
+        txt += " (fps declared" + (f", added later {am})" if am else ")")
+    return txt
+
+
+def ai_text(r):
+    """Declaration whether an AI outside the ComfyUI run helped (e.g. Claude / ChatGPT writing the prompts)."""
+    man, amended = r.get("manual") or {}, r.get("amended") or {}
+    used = str(man.get("external_ai") or "").strip().lower()
+    tools = str(man.get("external_ai_tools") or "").strip()
+    later = sorted({amended[k] for k in ("external_ai", "external_ai_tools") if k in amended})
+    tail = f" (declared, added later {later[-1]})" if later else " (declared)"
+    if used == "yes":
+        return "YES – " + (tools or f"which AI: {UNK}") + tail
+    if used == "no":
+        return "no external AI used" + (f" – {tools}" if tools else "") + tail
+    if tools:
+        return tools + tail
+    return UNK
+
+
+def ai_relevant(r):
+    """External-AI line: always for steps with prompts, else only when something was declared."""
+    man = r.get("manual") or {}
+    return bool(r.get("sampling") or r.get("prompt_writers") or str(man.get("external_ai") or "").strip()
+                or str(man.get("external_ai_tools") or "").strip())
 
 
 def _short(text, n=400):
@@ -983,6 +1117,10 @@ def breakdown_details(r, licenses=True):
                 rows.append((label, man[k]))
         if (r["file"] or {}).get("camera"):
             rows.append(("Camera", camera_text(r["file"]["camera"])))
+        if r.get("kind") != PHOTO and ai_relevant(r):
+            rows.append(("External AI", ai_text(r)))
+        if timing_text(r):
+            rows.append(("Duration", timing_text(r)))
         return rows
     main = [m for m in r["models"] if m.get("role") not in ("vae", "text_encoder", "clip_vision")] or r["models"]
     for m in main:
@@ -995,6 +1133,10 @@ def breakdown_details(r, licenses=True):
         rows.append(("Model", f"+ {other} supporting model(s) (VAE, text encoder …) – see the audit"))
     if r["sampling"]:
         rows.append(("Generation", ", ".join(x["node"].split(" #")[0] for x in r["sampling"])))
+    if ai_relevant(r):
+        rows.append(("External AI", ai_text(r)))
+    if timing_text(r):
+        rows.append(("Duration", timing_text(r)))
     out = man.get("changes_outside_comfyui") or man.get("planned_work_outside")
     if str(out or "").strip() and str(out).strip().lower() not in ("none", "-"):
         rows.append(("Outside ComfyUI", out))
@@ -1099,6 +1241,8 @@ def step_details(r, full=False):
                 ("Software", decl("external_software")),
                 ("Changes", decl("changes_outside_comfyui")),
                 ("Origin / rights", decl("reference_image_sources")),
+                *([("External AI", ai_text(r))] if r.get("kind") != PHOTO and ai_relevant(r) else []),
+                *([("Duration", timing_text(r))] if timing_text(r) else []),
                 *([("Camera", camera_text(f["camera"]))] if f.get("camera") and (
                     r.get("kind") == PHOTO or not any(is_photo_asset(x) for x in r["inputs"])) else []),
                 ("Resolution", (f"{final_res} ({f.get('format')})" if r.get("kind") == PHOTO else
@@ -1150,6 +1294,8 @@ def step_details(r, full=False):
     for w in r["prompt_writers"]:
         rows.append(("Prompt writer", f"{w['node']} -> {', '.join(w['feeds']) or '?'} (prompt written by an LLM / "
                                       "VLM in the run – recorded above)"))
+    if ai_relevant(r):
+        rows.append(("External AI", ai_text(r)))
     res = r["resolution"] or {}
     gen = [t for t in (_gen_text(g) for g in res.get("generation") or []) if t]
     gen_s = ", ".join(gen) if gen else (UNK if r["sampling"] else "not applicable")
@@ -1160,10 +1306,11 @@ def step_details(r, full=False):
     else:
         rows.append(("Resolution", f"source {', '.join(src) if src else ('none (no image input)' if not r['inputs'] else UNK)}"
                                    f" · generation {gen_s} · final {final_res}"))
-    if _is_video(r) or ((r.get("audio") or {}).get("duration_sec") and not aud):
+    if _is_video(r):
+        rows.append(("Duration", timing_text(r)))
+    elif (r.get("audio") or {}).get("duration_sec") and not aud:
         t = _timing(r)
-        rows.append(("Duration", (f"{t[0]} frames @ {t[1]:g} fps = {t[2]:.2f} s" if t and t[0] else
-                                  f"{t[2]:.2f} s @ {t[1]:g} fps" if t else UNK)))
+        rows.append(("Duration", f"{t[2]:.2f} s @ {t[1]:g} fps" if t else UNK))
     rows.append(("External software", decl("external_software")))
     rows.append(("Outside ComfyUI", decl("changes_outside_comfyui", "planned_work_outside")))
     return rows
@@ -1175,7 +1322,7 @@ CHECK_ITEMS = [
     "VLMs", "video models", "APIs", "custom nodes", "reference-image sources", "prompts",
     "negative prompts where relevant", "seed", "sampler / scheduler", "steps", "CFG or equivalent", "denoise values",
     "source resolution", "generation resolution", "final resolution", "video duration", "frame rate",
-    "external software used", "changes performed outside ComfyUI"]
+    "external software used", "changes performed outside ComfyUI", "external AI (e.g. prompts)"]
 
 
 def checklist(steps):
@@ -1261,12 +1408,17 @@ def checklist(steps):
         if r["sampling"] else None)
     fin_res = lambda r: bool(r["file"].get("width")) if r["file"].get("format") not in (None, "audio") else None  # noqa: E731
     add("final resolution", fin_res, external=fin_res)
-    add("video duration", lambda r: (_timing(r) is not None) if _is_video(r) else None)
-    add("frame rate", lambda r: bool((_timing(r) or (None, None))[1]) if _is_video(r) else None)
+    vdur = lambda r: (_timing(r) is not None) if _is_video(r) else None  # noqa: E731
+    vfps = lambda r: bool((_timing(r) or (None, None))[1]) if _is_video(r) else None  # noqa: E731
+    add("video duration", vdur, external=vdur)
+    add("frame rate", vfps, external=vfps)
     add("external software used", lambda r: decl(r, "external_software"),
         external=lambda r: decl(r, "external_software"))
     add("changes performed outside ComfyUI", lambda r: decl(r, "changes_outside_comfyui", "planned_work_outside"),
         external=lambda r: decl(r, "changes_outside_comfyui"))
+    ai = lambda r: str(r["manual"].get("external_ai") or "").strip().lower() in ("yes", "no")  # noqa: E731
+    add("external AI (e.g. prompts)", lambda r: ai(r) if ai_relevant(r) else None, "declared yes / no",
+        external=lambda r: True if ai(r) else None)
     return out
 
 

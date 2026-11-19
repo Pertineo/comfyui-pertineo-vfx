@@ -678,6 +678,9 @@ def _topic_sections(doc, w, steps, summary, full_prompts, assess, licenses):
             for wr in r["prompt_writers"]:
                 _para(w, doc, f"Prompt writer: {wr['node']} -> {', '.join(wr['feeds']) or '?'} (written by an LLM / "
                               "VLM in the run – recorded above)", 7.6, GREY, 8)
+            doc.text(M_L + 8, w.y + 8, "external AI (outside this run)", 7.6, True, GREY)
+            w.y += 12
+            _para(w, doc, CH.ai_text(r), 8.3, DARK, 8)
             w.y += 4
 
     # ---- outputs
@@ -691,8 +694,9 @@ def _topic_sections(doc, w, steps, summary, full_prompts, assess, licenses):
             size = CH.audio_text(aud)
         sha = (r.get("outputs") or [""])[0] if r.get("outputs") else ""
         rng = CH.frame_range_text(r)
+        tim = CH.timing_text(r).split(" (")[0]
         rows.append(([s["id"], f.get("name") or "", f"{size}\n{f.get('format') or ''}".strip() +
-                      (f"\n{rng}" if rng else ""),
+                      (f"\n{rng}" if rng else "") + (f"\n{tim}" if tim else ""),
                       str(f.get("saved") or r.get("generated") or "")[:16].replace("T", " "),
                       _sha(sha, False), CH.repro_text(r) +
                       (f"\n{len(s.get('alternatives') or [])} variant(s) not used" if s.get("alternatives") else "")],
